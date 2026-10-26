@@ -1,0 +1,9 @@
+# Build artifacts and local data
+/bin/
+/dist/
+/clerify
+*.test
+*.out
+.vscode/
+.idea/
+.commandcode/
