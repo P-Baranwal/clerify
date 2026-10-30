@@ -27,7 +27,11 @@ func (a *App) lsCmd() *cobra.Command {
 		Use:     "ls [query]",
 		Aliases: []string{"list"},
 		Short:   "List items",
-		Args:    cobra.ArbitraryArgs,
+		Long:    "List items with a stable #N reference number. The number follows priority order, not the current sort; use it, an id prefix, or a title in other commands.",
+		Example: `  clerify ls
+  clerify ls --overdue
+  clerify ls --status doing --project website`,
+		Args: cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := a.ensure(); err != nil {
 				return err
@@ -37,15 +41,19 @@ func (a *App) lsCmd() *cobra.Command {
 	}
 
 	fl := cmd.Flags()
-	fl.StringSliceVar(&statuses, "status", nil, "filter by status: todo|in_progress|blocked|done (repeatable)")
+	fl.StringSliceVar(&statuses, "status", nil, "filter by status: todo|doing|in_progress|blocked|done (repeatable)")
 	fl.StringVar(&projectRef, "project", "", "filter by project id, id prefix, or title")
 	fl.BoolVar(&overdue, "overdue", false, "only items past their deadline")
 	fl.IntVar(&dueWithin, "due-within", 0, "only items due within N days")
 	fl.StringVar(&typeFilter, "type", "", "filter by type")
-	fl.StringVar(&sortKey, "sort", derive.SortPriority, "priority|due|updated|roi|title")
+	fl.StringVar(&sortKey, "sort", derive.SortPriority, "priority|due|updated|roi (impact for effort)|title")
 	fl.IntVar(&limit, "limit", 0, "maximum rows (0 = all)")
 	fl.BoolVar(&includeAll, "all", false, "include completed items")
 	fl.BoolVar(&doneOnly, "done", false, "only completed items")
+	_ = cmd.RegisterFlagCompletionFunc("status", a.completeStatuses)
+	_ = cmd.RegisterFlagCompletionFunc("sort", a.completeSortKeys)
+	_ = cmd.RegisterFlagCompletionFunc("type", a.completeTypes)
+	_ = cmd.RegisterFlagCompletionFunc("project", a.completeProjectRefs)
 	return cmd
 }
 
@@ -103,18 +111,24 @@ func (a *App) runLs(cmd *cobra.Command, args []string, statuses []string, projec
 		return a.printJSON(items)
 	}
 	if len(items) == 0 {
-		a.printf("No matching items.\n")
+		if len(a.DB.Items()) == 0 {
+			a.printf("No items yet. Try: clerify add \"Write report\" --due 2026-11-05\n")
+		} else {
+			a.printf("No items match those filters. Try: clerify ls --all\n")
+		}
 		return nil
 	}
-	render.ItemTable(a.Out, items, a.DB.ProjectTitle, a.now())
+	render.ItemTableNumbered(a.Out, items, a.DB.ProjectTitle, a.now(), referenceNumbers(a.DB.Items()))
 	return nil
 }
 
 func (a *App) showCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "show <id>",
-		Short: "Show one item in full",
-		Args:  exactArgs(1),
+		Use:               "show <id>",
+		Short:             "Show one item in full",
+		Example:           "  clerify show #1\n  clerify show 7f3a1b",
+		Args:              exactArgs(1),
+		ValidArgsFunction: a.completeItemIDs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := a.ensure(); err != nil {
 				return err

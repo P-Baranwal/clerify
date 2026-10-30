@@ -19,8 +19,10 @@ import (
 
 func (a *App) configCmd() *cobra.Command {
 	parent := &cobra.Command{
-		Use:   "config",
-		Short: "Show or change profile settings",
+		Use:     "config",
+		Short:   "Show or change profile settings",
+		Long:    "Profile settings shape AI scoring (skills, priority preset, available hours) and presentation (table style, date format).",
+		Example: "  clerify config show\n  clerify config set --hours 4",
 	}
 	parent.AddCommand(a.configShowCmd(), a.configSetCmd(), a.configPathCmd())
 	return parent
@@ -28,9 +30,10 @@ func (a *App) configCmd() *cobra.Command {
 
 func (a *App) configShowCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "show",
-		Short: "Show the profile and AI settings",
-		Args:  cobra.NoArgs,
+		Use:     "show",
+		Short:   "Show the profile and AI settings",
+		Example: "  clerify config show",
+		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := a.ensure(); err != nil {
 				return err
@@ -83,9 +86,10 @@ func (a *App) configSetCmd() *cobra.Command {
 		dateFormat     string
 	)
 	cmd := &cobra.Command{
-		Use:   "set",
-		Short: "Change profile settings",
-		Args:  cobra.NoArgs,
+		Use:     "set",
+		Short:   "Change profile settings",
+		Example: "  clerify config set --hours 4 --preset Balanced\n  clerify config set --date-format \"Jan 2, 2006\"",
+		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := a.ensure(); err != nil {
 				return err
@@ -170,14 +174,16 @@ func (a *App) configSetCmd() *cobra.Command {
 	fl.StringVar(&theme, "theme", "", "system|light|dark")
 	fl.StringVar(&tableStyle, "table-style", "", "plain|ascii|unicode")
 	fl.StringVar(&dateFormat, "date-format", "", "2006-01-02|02/01/2006|Jan 2, 2006")
+	_ = cmd.RegisterFlagCompletionFunc("default-project", a.completeProjectRefs)
 	return cmd
 }
 
 func (a *App) configPathCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "path",
-		Short: "Print the files clerify uses",
-		Args:  cobra.NoArgs,
+		Use:     "path",
+		Short:   "Print the files clerify uses",
+		Example: "  clerify config path",
+		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := a.ensure(); err != nil {
 				return err
@@ -199,8 +205,10 @@ func (a *App) configPathCmd() *cobra.Command {
 
 func (a *App) aiCmd() *cobra.Command {
 	parent := &cobra.Command{
-		Use:   "ai",
-		Short: "Configure the AI provider",
+		Use:     "ai",
+		Short:   "Configure the AI provider",
+		Long:    "Advanced AI configuration. Most people should run `clerify init` instead; these subcommands are for presets, keys, and diagnostics.",
+		Example: "  clerify ai preset openai\n  clerify ai test",
 	}
 	parent.AddCommand(a.aiPresetCmd(), a.aiKeyCmd(), a.aiTestCmd(), a.aiModelsCmd(), a.aiShowCmd())
 	return parent
@@ -215,9 +223,10 @@ func (a *App) aiPresetCmd() *cobra.Command {
 		wire    string
 	)
 	cmd := &cobra.Command{
-		Use:   "preset <name>",
-		Short: "Apply a provider preset (any OpenAI-compatible endpoint)",
-		Args:  exactArgs(1),
+		Use:     "preset <name>",
+		Short:   "Apply a provider preset (any OpenAI-compatible endpoint)",
+		Example: "  clerify ai preset openai\n  clerify ai preset custom --base-url http://localhost:11434/v1 --model qwen2.5-coder:7b",
+		Args:    exactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := a.ensure(); err != nil {
 				return err
@@ -284,9 +293,10 @@ func (a *App) aiKeyCmd() *cobra.Command {
 		clear bool
 	)
 	cmd := &cobra.Command{
-		Use:   "key",
-		Short: "Store the API key in config.json (0600)",
-		Args:  cobra.NoArgs,
+		Use:     "key",
+		Short:   "Store the API key in config.json (0600)",
+		Example: "  printf '%s' \"$OPENAI_API_KEY\" | clerify ai key --stdin\n  clerify ai key --clear",
+		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := a.ensure(); err != nil {
 				return err
@@ -331,9 +341,10 @@ func (a *App) aiKeyCmd() *cobra.Command {
 
 func (a *App) aiTestCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "test",
-		Short: "Send one tiny request and report latency",
-		Args:  cobra.NoArgs,
+		Use:     "test",
+		Short:   "Send one tiny request and report latency",
+		Example: "  clerify ai test",
+		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := a.ensure(); err != nil {
 				return err
@@ -359,9 +370,10 @@ func (a *App) aiTestCmd() *cobra.Command {
 
 func (a *App) aiModelsCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "models",
-		Short: "List models when the provider exposes /models",
-		Args:  cobra.NoArgs,
+		Use:     "models",
+		Short:   "List models when the provider exposes /models",
+		Example: "  clerify ai models",
+		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := a.ensure(); err != nil {
 				return err
@@ -383,9 +395,10 @@ func (a *App) aiModelsCmd() *cobra.Command {
 
 func (a *App) aiShowCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "show",
-		Short: "Show the effective AI configuration",
-		Args:  cobra.NoArgs,
+		Use:     "show",
+		Short:   "Show the effective AI configuration",
+		Example: "  clerify ai show",
+		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := a.ensure(); err != nil {
 				return err
@@ -418,9 +431,10 @@ type doctorCheck struct {
 
 func (a *App) doctorCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "doctor",
-		Short: "Diagnose the local setup",
-		Args:  cobra.NoArgs,
+		Use:     "doctor",
+		Short:   "Diagnose the local setup",
+		Example: "  clerify doctor\n  clerify doctor --json",
+		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := a.ensure(); err != nil {
 				return err
@@ -497,19 +511,6 @@ func doctorRows(checks []doctorCheck) [][]string {
 		rows = append(rows, []string{c.Name, status, c.Detail})
 	}
 	return rows
-}
-
-// ── tui ──────────────────────────────────────────────────────────────────────
-
-func (a *App) tuiCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "tui",
-		Short: "Open the interactive interface",
-		Args:  cobra.NoArgs,
-		RunE: func(cmd *cobra.Command, args []string) error {
-			return fail(2, fmt.Errorf("the interactive TUI is not implemented yet"))
-		},
-	}
 }
 
 // ── helpers ──────────────────────────────────────────────────────────────────

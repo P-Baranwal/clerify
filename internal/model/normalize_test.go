@@ -184,7 +184,7 @@ func TestParseStatusStrict(t *testing.T) {
 		"todo":        StatusTodo,
 		"active":      StatusTodo,
 		"in_progress": StatusInProgress,
-		"doing":       "",
+		"doing":       StatusInProgress,
 		"blocked":     StatusBlocked,
 		"done":        StatusDone,
 		"completed":   StatusDone,

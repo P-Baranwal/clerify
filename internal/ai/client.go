@@ -49,13 +49,13 @@ func (c *Client) KeyEnvName() string { return keyEnvName(c.cfg) }
 func (c *Client) Analyze(ctx context.Context, system, user, feature string) (string, error) {
 	key := c.key
 	if key == "" && !c.cfg.NoAuth {
-		return "", &ConfigError{Message: fmt.Sprintf("no API key configured; set %s or run `clerify ai key`", keyEnvName(c.cfg))}
+		return "", &ConfigError{Message: fmt.Sprintf("no API key configured; run `clerify init` or set %s", keyEnvName(c.cfg))}
 	}
 	if strings.TrimSpace(c.cfg.BaseURL) == "" {
-		return "", &ConfigError{Message: "no base URL configured; run `clerify ai preset <name>` or set --base-url"}
+		return "", &ConfigError{Message: "no base URL configured; run `clerify init` or `clerify ai preset <name>`"}
 	}
 	if strings.TrimSpace(c.cfg.Model) == "" {
-		return "", &ConfigError{Message: "no model configured; run `clerify ai preset <name>` or set --model"}
+		return "", &ConfigError{Message: "no model configured; run `clerify init` or `clerify ai preset <name>`"}
 	}
 
 	attempts := c.cfg.Retries + 1

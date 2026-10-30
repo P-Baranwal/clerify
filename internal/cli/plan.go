@@ -17,17 +17,22 @@ import (
 )
 
 func (a *App) todayCmd() *cobra.Command {
-	return &cobra.Command{
-		Use:   "today",
-		Short: "What needs attention today",
-		Args:  cobra.NoArgs,
+	var all bool
+	cmd := &cobra.Command{
+		Use:     "today",
+		Short:   "What needs attention today",
+		Long:    "Show overdue items, what is due today, and the top five priorities. Inbox means items not in a project; ROI means impact for the effort. Those extra sections appear when they have data; --all shows every section.",
+		Example: "  clerify today\n  clerify today --all",
+		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := a.ensure(); err != nil {
 				return err
 			}
-			return a.runToday()
+			return a.runToday(all)
 		},
 	}
+	cmd.Flags().BoolVar(&all, "all", false, "show every section, even when empty")
+	return cmd
 }
 
 type todayOutput struct {
@@ -41,7 +46,7 @@ type todayOutput struct {
 	Blocks   []model.PlanBlock `json:"planBlocks,omitempty"`
 }
 
-func (a *App) runToday() error {
+func (a *App) runToday(all bool) error {
 	now := a.now()
 	items := a.DB.Items()
 
@@ -83,33 +88,42 @@ func (a *App) runToday() error {
 
 	fmt.Fprintf(a.Out, "Today %s\n%s\n\n", out.Date, strings.Repeat("─", 16))
 
-	if len(out.Overdue) > 0 {
-		fmt.Fprintln(a.Out, "OVERDUE")
-		render.ItemTable(a.Out, out.Overdue, a.DB.ProjectTitle, now)
+	if len(items) == 0 {
+		a.printf("No tasks yet. Try: clerify add \"Write report\" --due tomorrow\n")
+		return nil
+	}
+	if !all && len(out.Top) == 0 {
+		a.printf("Nothing open right now. Try: clerify add \"Next task\"\n")
+		return nil
+	}
+
+	section := func(title string, list []model.Item) {
+		fmt.Fprintln(a.Out, title)
+		if len(list) == 0 {
+			fmt.Fprintln(a.Out, "  (nothing)")
+		} else {
+			render.ItemTable(a.Out, list, a.DB.ProjectTitle, now)
+		}
 		fmt.Fprintln(a.Out)
 	}
-	if len(out.DueToday) > 0 {
-		fmt.Fprintln(a.Out, "DUE TODAY")
-		render.ItemTable(a.Out, out.DueToday, a.DB.ProjectTitle, now)
-		fmt.Fprintln(a.Out)
+
+	if all || len(out.Overdue) > 0 {
+		section("OVERDUE", out.Overdue)
 	}
-	if len(out.Top) > 0 {
-		fmt.Fprintln(a.Out, "TOP PRIORITY")
-		render.ItemTable(a.Out, out.Top, a.DB.ProjectTitle, now)
-		fmt.Fprintln(a.Out)
+	if all || len(out.DueToday) > 0 {
+		section("DUE TODAY", out.DueToday)
 	}
-	if len(out.Inbox) > 0 {
+	if all || len(out.Top) > 0 {
+		section("TOP PRIORITY", out.Top)
+	}
+	if all || len(out.Inbox) > 0 {
 		allInbox := derive.Inbox(a.DB.Items())
-		fmt.Fprintf(a.Out, "INBOX (%d)\n", len(allInbox))
-		render.ItemTable(a.Out, out.Inbox, a.DB.ProjectTitle, now)
-		fmt.Fprintln(a.Out)
+		section(fmt.Sprintf("INBOX (%d)", len(allInbox)), out.Inbox)
 	}
-	if len(out.HighROI) > 0 {
-		fmt.Fprintln(a.Out, "HIGH ROI")
-		render.ItemTable(a.Out, out.HighROI, a.DB.ProjectTitle, now)
-		fmt.Fprintln(a.Out)
+	if all || len(out.HighROI) > 0 {
+		section("HIGH ROI (impact for the effort)", out.HighROI)
 	}
-	if out.Risk.TaskCount > 0 {
+	if all || out.Risk.TaskCount > 0 {
 		fmt.Fprintf(a.Out, "CAPACITY   %s due in 7 days across %d items; %s available",
 			format.Hours(out.Risk.TotalHours), out.Risk.TaskCount, format.Hours(out.Risk.AvailableHours))
 		if out.Risk.Overloaded {
@@ -122,13 +136,25 @@ func (a *App) runToday() error {
 		fmt.Fprintln(a.Out)
 		fmt.Fprintln(a.Out)
 	}
-	if len(out.Blocks) > 0 {
+	if all || len(out.Blocks) > 0 {
 		fmt.Fprintln(a.Out, "TODAY'S PLAN")
+		if len(out.Blocks) == 0 {
+			fmt.Fprintln(a.Out, "  (nothing scheduled; run `clerify plan --refresh`)")
+		}
 		for _, b := range out.Blocks {
 			fmt.Fprintf(a.Out, "  %-10s %s  (%s)\n", b.Slot, b.Task, format.Hours(b.Hours))
 		}
 	}
 	return nil
+}
+
+// printWelcome is the first-run screen. It names the three things a newcomer
+// actually needs: capture, review, and the optional AI step.
+func (a *App) printWelcome() {
+	a.printf("Welcome to clerify — your tasks live in one local JSON file.\n\n")
+	a.printf("Add your first task:  clerify add \"Write report\" --due friday\n")
+	a.printf("See what's next:      clerify today\n")
+	a.printf("AI scoring (optional): clerify init    Everything else works offline.\n")
 }
 
 // todayBlocks returns the cached plan's blocks for today, if any.
@@ -155,9 +181,11 @@ func (a *App) planCmd() *cobra.Command {
 		days    int
 	)
 	cmd := &cobra.Command{
-		Use:   "plan",
-		Short: "Show or regenerate the weekly plan",
-		Args:  cobra.NoArgs,
+		Use:     "plan",
+		Short:   "Show or regenerate the weekly plan",
+		Long:    "Show the cached weekly plan. --refresh asks the AI to build a new one from the current items.",
+		Example: "  clerify plan\n  clerify plan --refresh --days 3",
+		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := a.ensure(); err != nil {
 				return err
@@ -244,9 +272,10 @@ func (a *App) showPlan(days int) error {
 func (a *App) calendarCmd() *cobra.Command {
 	var month string
 	cmd := &cobra.Command{
-		Use:   "calendar",
-		Short: "Show a month grid with deadlines",
-		Args:  cobra.NoArgs,
+		Use:     "calendar",
+		Short:   "Show a month grid with deadlines",
+		Example: "  clerify calendar\n  clerify calendar --month 2026-11",
+		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := a.ensure(); err != nil {
 				return err

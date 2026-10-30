@@ -21,6 +21,8 @@ func (a *App) projectCmd() *cobra.Command {
 		Use:     "project",
 		Aliases: []string{"proj"},
 		Short:   "Manage projects",
+		Long:    "Projects group related items. Use `project new` to create one and `project show --board` to see its items by status.",
+		Example: "  clerify project new --title \"Website redesign\"\n  clerify project ls\n  clerify project show website",
 	}
 	parent.AddCommand(a.projectNewCmd(), a.projectLsCmd(), a.projectShowCmd(), a.projectDoneCmd(), a.projectRmCmd())
 	return parent
@@ -34,9 +36,10 @@ func (a *App) projectNewCmd() *cobra.Command {
 		withWBS   bool
 	)
 	cmd := &cobra.Command{
-		Use:   "new",
-		Short: "Create a project",
-		Args:  cobra.NoArgs,
+		Use:     "new",
+		Short:   "Create a project",
+		Example: "  clerify project new --title \"Website redesign\"\n  clerify project new --title \"Q4 launch\" --brief \"...\" --wbs",
+		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := a.ensure(); err != nil {
 				return err
@@ -139,9 +142,10 @@ func (a *App) createProject(title, brief string, wbs []ai.WBSItem) (model.Projec
 
 func (a *App) projectLsCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "ls",
-		Short: "List projects",
-		Args:  cobra.NoArgs,
+		Use:     "ls",
+		Short:   "List projects",
+		Example: "  clerify project ls",
+		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := a.ensure(); err != nil {
 				return err
@@ -151,7 +155,7 @@ func (a *App) projectLsCmd() *cobra.Command {
 				return a.printJSON(projects)
 			}
 			if len(projects) == 0 {
-				a.printf("No projects yet.\n")
+				a.printf("No projects yet. Try: clerify project new --title \"Website redesign\"\n")
 				return nil
 			}
 			counts := make(map[string]int)
@@ -169,9 +173,11 @@ func (a *App) projectLsCmd() *cobra.Command {
 func (a *App) projectShowCmd() *cobra.Command {
 	var board bool
 	cmd := &cobra.Command{
-		Use:   "show <ref>",
-		Short: "Show a project and its items",
-		Args:  exactArgs(1),
+		Use:               "show <ref>",
+		Short:             "Show a project and its items",
+		Example:           "  clerify project show website\n  clerify project show 7f3a1b --board",
+		Args:              exactArgs(1),
+		ValidArgsFunction: a.completeProjectRefs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := a.ensure(); err != nil {
 				return err
@@ -214,9 +220,11 @@ func (a *App) projectShowCmd() *cobra.Command {
 
 func (a *App) projectDoneCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:   "done <ref>",
-		Short: "Mark a project done",
-		Args:  exactArgs(1),
+		Use:               "done <ref>",
+		Short:             "Mark a project done",
+		Example:           "  clerify project done website",
+		Args:              exactArgs(1),
+		ValidArgsFunction: a.completeProjectRefs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := a.ensure(); err != nil {
 				return err
@@ -260,10 +268,12 @@ func (a *App) projectDoneCmd() *cobra.Command {
 
 func (a *App) projectRmCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:     "rm <ref>",
-		Aliases: []string{"delete"},
-		Short:   "Delete a project (its items become inbox items)",
-		Args:    exactArgs(1),
+		Use:               "rm <ref>",
+		Aliases:           []string{"delete"},
+		Short:             "Delete a project (its items become inbox items)",
+		Example:           "  clerify project rm website",
+		Args:              exactArgs(1),
+		ValidArgsFunction: a.completeProjectRefs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := a.ensure(); err != nil {
 				return err
@@ -323,9 +333,13 @@ func (a *App) wbsCmd() *cobra.Command {
 		apply     bool
 	)
 	cmd := &cobra.Command{
-		Use:   "wbs [project]",
-		Short: "Generate a work breakdown structure",
-		Args:  cobra.MaximumNArgs(1),
+		Use:               "wbs [project]",
+		Aliases:           []string{"breakdown"},
+		Short:             "Break a project brief into smaller tasks",
+		Long:              "Ask the AI to turn a brief into concrete sub-tasks. Without --apply it only prints the proposed breakdown.",
+		Example:           "  clerify wbs --brief \"Add OAuth login\"\n  clerify wbs --brief-file brief.pdf --apply",
+		Args:              cobra.MaximumNArgs(1),
+		ValidArgsFunction: a.completeProjectRefs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := a.ensure(); err != nil {
 				return err

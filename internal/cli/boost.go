@@ -18,9 +18,12 @@ func (a *App) boostCmd() *cobra.Command {
 		clear  bool
 	)
 	cmd := &cobra.Command{
-		Use:   "boost <id>",
-		Short: "Temporarily raise an item's priority with a reason",
-		Args:  exactArgs(1),
+		Use:               "boost <id>",
+		Short:             "Temporarily raise an item's priority with a reason",
+		Long:              "A boost overrides the normal priority until you clear it. Use it when something urgent came up; the original score is kept underneath.",
+		Example:           "  clerify boost #2 --reason \"exam tomorrow\"\n  clerify boost #2 --clear",
+		Args:              exactArgs(1),
+		ValidArgsFunction: a.completeItemIDs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := a.ensure(); err != nil {
 				return err
@@ -155,9 +158,12 @@ func (a *App) rescoreCmd() *cobra.Command {
 		includeEmpty bool
 	)
 	cmd := &cobra.Command{
-		Use:   "rescore",
-		Short: "Re-run AI scoring across items",
-		Args:  cobra.NoArgs,
+		Use:     "rescore",
+		Aliases: []string{"refresh-scores"},
+		Short:   "Recompute AI scores for existing items",
+		Long:    "Re-run AI scoring in bulk. Only AI-owned fields (difficulty, priority, reasoning) change; your title, type, deadline, and estimate are left alone.",
+		Example: "  clerify rescore\n  clerify rescore --failed-only",
+		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := a.ensure(); err != nil {
 				return err

@@ -86,9 +86,7 @@ func TestMissingArgumentExitsTwo(t *testing.T) {
 }
 
 func TestAnalyzeWithoutKeyExitsFour(t *testing.T) {
-	t.Setenv("CLERIFY_API_KEY", "")
-	t.Setenv("SARVAM_API_KEY", "")
-	t.Setenv("CUSTOM_API_KEY", "")
+	clearKeyEnv(t)
 
 	dir := t.TempDir()
 	if code, _, errOut := runCLI(t, "", "--data-dir", dir, "add", "Something", "--no-ai"); code != 0 {
@@ -160,7 +158,7 @@ func TestDeleteAndUndo(t *testing.T) {
 }
 
 func TestProjectAndWBSDryRun(t *testing.T) {
-	t.Setenv("CLERIFY_API_KEY", "")
+	clearKeyEnv(t)
 	dir := t.TempDir()
 
 	if code, _, errOut := runCLI(t, "", "--data-dir", dir, "project", "new", "--title", "Client portal"); code != 0 {

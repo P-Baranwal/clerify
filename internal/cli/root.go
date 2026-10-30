@@ -60,7 +60,15 @@ type App struct {
 	Err   io.Writer
 	Now   func() time.Time
 	Stdin io.Reader
+
+	// Fresh is true when store.json did not exist before this invocation.
+	Fresh bool
 }
+
+const (
+	groupEveryday = "everyday"
+	groupAdvanced = "advanced"
+)
 
 // Execute runs the CLI and returns the process exit code.
 func Execute() int {
@@ -121,14 +129,39 @@ func (a *App) rootCmd() *cobra.Command {
 	root := &cobra.Command{
 		Use:           "clerify",
 		Short:         "Personal, local-first task and project manager with AI scoring",
-		Long:          "clerify is a single-user, no-account task and project manager. Everything lives in one JSON file you own.",
+		Long:          "clerify is a single-user, no-account task and project manager. Everything lives in one JSON file you own. Run `clerify guide` for a short walkthrough.",
+		Example:       "  clerify add \"Write report\" --due friday\n  clerify today\n  clerify done #1",
 		Version:       Version,
 		SilenceUsage:  true,
 		SilenceErrors: true,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return cmd.Help()
+			if len(args) > 0 {
+				return cmd.Help()
+			}
+			if err := a.ensure(); err != nil {
+				return err
+			}
+			if a.flags.JSON {
+				return a.runToday(false)
+			}
+			if a.Fresh && len(a.DB.Items()) == 0 && len(a.DB.Projects()) == 0 {
+				a.printWelcome()
+				return nil
+			}
+			return a.runToday(false)
 		},
 	}
+
+	root.SetOut(a.Out)
+	root.SetErr(a.Err)
+	root.SetIn(a.Stdin)
+
+	root.AddGroup(
+		&cobra.Group{ID: groupEveryday, Title: "Everyday commands:"},
+		&cobra.Group{ID: groupAdvanced, Title: "Advanced commands:"},
+	)
+	root.SetHelpCommandGroupID(groupEveryday)
+	root.SetCompletionCommandGroupID(groupEveryday)
 
 	pf := root.PersistentFlags()
 	pf.StringVar(&a.flags.DataDir, "data-dir", "", "data directory (default $CLERIFY_HOME or the user config dir)")
@@ -145,32 +178,42 @@ func (a *App) rootCmd() *cobra.Command {
 		return fail(2, err)
 	})
 
-	root.AddCommand(
+	addGrouped(root, groupEveryday,
 		a.addCmd(),
-		a.analyzeCmd(),
 		a.lsCmd(),
+		a.todayCmd(),
+		a.undoCmd(),
 		a.showCmd(),
 		a.editCmd(),
 		a.rmCmd(),
-		a.undoCmd(),
-		a.boostCmd(),
-		a.rescoreCmd(),
-		a.todayCmd(),
 		a.planCmd(),
 		a.calendarCmd(),
 		a.projectCmd(),
+		a.digestCmd(),
+		a.initCmd(),
+		a.guideCmd(),
+	)
+	addGrouped(root, groupAdvanced,
+		a.analyzeCmd(),
+		a.boostCmd(),
+		a.rescoreCmd(),
 		a.wbsCmd(),
 		a.reportCmd(),
-		a.digestCmd(),
 		a.exportCmd(),
 		a.importCmd(),
 		a.configCmd(),
 		a.aiCmd(),
 		a.doctorCmd(),
-		a.tuiCmd(),
 	)
-	root.AddCommand(a.statusCmds()...)
+	addGrouped(root, groupEveryday, a.statusCmds()...)
 	return root
+}
+
+func addGrouped(root *cobra.Command, groupID string, cmds ...*cobra.Command) {
+	for _, cmd := range cmds {
+		cmd.GroupID = groupID
+		root.AddCommand(cmd)
+	}
 }
 
 // ensure lazily opens the store and config so commands like `completion` do
@@ -182,6 +225,9 @@ func (a *App) ensure() error {
 	paths, err := store.ResolvePaths(a.flags.DataDir)
 	if err != nil {
 		return err
+	}
+	if _, statErr := os.Stat(paths.StoreFile); os.IsNotExist(statErr) {
+		a.Fresh = true
 	}
 	cfg, cfgErr := config.Load(paths.ConfigFile)
 	if cfgErr != nil && !a.flags.Quiet {
@@ -283,11 +329,7 @@ func (a *App) resolveProject(ref string) (*string, error) {
 
 // requireItem resolves an item reference or returns an exit-code-3 error.
 func (a *App) requireItem(ref string) (model.Item, error) {
-	it, err := a.DB.FindItem(ref)
-	if err != nil {
-		return model.Item{}, notFound("item", ref, err)
-	}
-	return it, nil
+	return a.resolveItemRef(ref)
 }
 
 func notFound(kind, ref string, err error) error {

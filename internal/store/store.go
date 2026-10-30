@@ -25,10 +25,29 @@ var (
 type AmbiguousError struct {
 	Ref        string
 	Candidates []string
+	// Labels are short, human-readable forms of the candidates. They are used
+	// in the error instead of the full UUIDs.
+	Labels []string
 }
 
 func (e *AmbiguousError) Error() string {
-	return fmt.Sprintf("ambiguous id %q matches %d items: %s", e.Ref, len(e.Candidates), strings.Join(e.Candidates, ", "))
+	items := e.Candidates
+	if len(e.Labels) > 0 {
+		items = e.Labels
+	}
+	return fmt.Sprintf("ambiguous id %q matches %d items: %s", e.Ref, len(items), strings.Join(items, ", "))
+}
+
+// shortRef renders "1a2b3c (Title)" for ambiguity messages.
+func shortRef(id, title string) string {
+	short := id
+	if len(short) > 6 {
+		short = short[:6]
+	}
+	if strings.TrimSpace(title) == "" {
+		return short
+	}
+	return short + " (" + title + ")"
 }
 
 // Paths holds every file location used by the CLI.
@@ -283,10 +302,12 @@ func (db *DB) FindItem(ref string) (model.Item, error) {
 		return candidates[0], nil
 	default:
 		ids := make([]string, 0, len(candidates))
+		labels := make([]string, 0, len(candidates))
 		for _, it := range candidates {
 			ids = append(ids, it.ID)
+			labels = append(labels, shortRef(it.ID, it.Title))
 		}
-		return model.Item{}, &AmbiguousError{Ref: ref, Candidates: ids}
+		return model.Item{}, &AmbiguousError{Ref: ref, Candidates: ids, Labels: labels}
 	}
 }
 
@@ -475,10 +496,12 @@ func (db *DB) FindProject(ref string) (model.Project, error) {
 		return byPrefix[0], nil
 	default:
 		ids := make([]string, 0, len(byPrefix))
+		labels := make([]string, 0, len(byPrefix))
 		for _, p := range byPrefix {
 			ids = append(ids, p.ID)
+			labels = append(labels, shortRef(p.ID, p.Title))
 		}
-		return model.Project{}, &AmbiguousError{Ref: ref, Candidates: ids}
+		return model.Project{}, &AmbiguousError{Ref: ref, Candidates: ids, Labels: labels}
 	}
 }
 

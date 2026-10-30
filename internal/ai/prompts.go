@@ -26,8 +26,8 @@ const JSONSchemaPrompt = `Output strictly in this JSON schema. Return NO markdow
 "checklist": ["string", "string"]
 }`
 
-const analyzeSystemPrompt = `You are an assignment metadata extractor. Your job is to analyze assignment text and
-output calibrated, realistic metadata — NOT to complete the assignment.
+const analyzeSystemPrompt = `You are a task metadata extractor. Your job is to analyze task text and
+output calibrated, realistic metadata — NOT to complete the task.
 
 ## Context
 Today's date: {{CURRENT_DATE}}
@@ -36,8 +36,8 @@ Priority strategy: {{PRESET}}
 Custom rule: {{CUSTOM_RULE}}
 
 ## Time Estimation Rules (most important)
-Estimate hours as a COMPETENT student at the user's skill level would realistically
-spend — not a perfect student, not a panicking one.
+Estimate hours as a COMPETENT person at the user's skill level would realistically
+spend — not an expert, not a panicking one.
 
 Use these anchors to calibrate:
 - A 500-word reflection: 1–1.5 hrs
@@ -53,8 +53,8 @@ Adjust the estimate based on user skills:
 - If the user is weak in the relevant skill → increase by up to 40%
 - If skills are unknown → use the midpoint anchor
 
-NEVER estimate more than 40 hours for a single assignment unless it is explicitly
-described as a multi-week capstone or thesis. Most assignments are 1–8 hours.
+NEVER estimate more than 40 hours for a single task unless it is explicitly
+described as a multi-week project or thesis. Most tasks are 1–8 hours.
 
 Before settling on a number, mentally decompose the work into subtasks and sum them.
 That decomposition should also inform your checklist.
@@ -68,9 +68,9 @@ Score relative to the user's current skill level — not absolute complexity:
 - 7–9: Significant stretch, multiple unfamiliar concepts
 - 10: Genuinely beyond their current ceiling (rare — use sparingly)
 
-Infer relevant skill from assignment domain (e.g., coding → programming skill, essay → writing skill)
+Infer relevant skill from the task domain (e.g., coding → programming skill, essay → writing skill)
 
-If skills are unknown, score against an average undergraduate.
+If skills are unknown, score against an average adult.
 
 ## Priority Score (0–100)
 Compute from:
@@ -95,7 +95,7 @@ Urgency bands:
 
 {{SCHEMA}}`
 
-const weeklyPlanSystemPrompt = `You are a productive work-planning assistant. Given a list of active tasks/assignments with deadlines,
+const weeklyPlanSystemPrompt = `You are a productive work-planning assistant. Given a list of active tasks with deadlines,
 generate a realistic day-by-day plan for the current week.
 
 Today is {{CURRENT_DATE}}. The user has approximately {{AVAILABLE_HOURS}} hours available per workday.
@@ -136,7 +136,7 @@ Output ONLY a raw JSON object — no markdown, no fences, no preamble.
   "type": "Essay | Coding | Math | Research | Other",
   "deadline": "YYYY-MM-DD or null",
   "estimatedHours": number,
-  "weight": "string or null (e.g. '20% of grade')",
+  "weight": "string or null (e.g. 'high priority')",
   "notes": "string or null (extra context)"
 }
 
@@ -147,7 +147,7 @@ Rules:
 - Be smart about parsing: "due Friday" means this coming Friday, "3 hours" means estimatedHours: 3.
 - If the input is too vague to extract meaningful data, return { "error": "true", "reason": "..." }.`
 
-const wbsSystemPrompt = `You are a professional project planner. Given a client brief or feature request,
+const wbsSystemPrompt = `You are a project planner. Given a project brief or feature request,
 decompose the work into concrete, actionable sub-tasks.
 
 Output ONLY a raw JSON array — no markdown, no fences, no preamble.
@@ -163,7 +163,7 @@ Each item must match this shape exactly:
 Rules:
 - 3 to 8 sub-tasks maximum
 - Titles must be specific and actionable (not "Research" — use "Research X API authentication options")
-- estimatedHours: realistic for a competent professional (not a beginner, not a hero)
+- estimatedHours: realistic for a competent person familiar with the work (not a beginner, not a hero)
 - impactScore: how much this sub-task moves the needle on the overall deliverable (1=minor, 10=critical path)
 - Today's date: {{CURRENT_DATE}}`
 
@@ -275,6 +275,6 @@ func BuildWBSPrompt(brief string, now time.Time) (system, user string) {
 		"CURRENT_DATE": now.Format(model.DateLayout),
 	})
 	quoted, _ := json.Marshal(brief)
-	user = "Client brief / feature request (JSON-encoded):\n" + string(quoted)
+	user = "Project brief / feature request (JSON-encoded):\n" + string(quoted)
 	return strings.TrimSpace(system), user
 }

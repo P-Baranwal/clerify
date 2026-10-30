@@ -80,7 +80,7 @@ func NormalizeStatus(s string) string {
 	switch s {
 	case StatusTodo, "active", "":
 		return StatusTodo
-	case StatusInProgress, "in-progress", "inprogress", "started":
+	case StatusInProgress, "in-progress", "inprogress", "started", "doing":
 		return StatusInProgress
 	case StatusBlocked, "block":
 		return StatusBlocked
@@ -143,14 +143,14 @@ func ParseStatus(s string) (string, error) {
 	switch raw {
 	case StatusTodo, "active", "":
 		return StatusTodo, nil
-	case StatusInProgress, "in-progress", "inprogress", "started":
+	case StatusInProgress, "in-progress", "inprogress", "started", "doing":
 		return StatusInProgress, nil
 	case StatusBlocked, "block":
 		return StatusBlocked, nil
 	case StatusDone, "complete", "completed":
 		return StatusDone, nil
 	default:
-		return "", fmt.Errorf("unknown status %q (use todo, in_progress, blocked, or done)", s)
+		return "", fmt.Errorf("unknown status %q (use todo, doing, in_progress, blocked, or done)", s)
 	}
 }
 

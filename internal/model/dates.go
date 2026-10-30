@@ -3,6 +3,7 @@ package model
 import (
 	"fmt"
 	"math"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -40,6 +41,105 @@ func ParseDeadlineStrict(s string) (string, error) {
 		return "", fmt.Errorf("invalid deadline %q: expected YYYY-MM-DD", s)
 	}
 	return t.Format(DateLayout), nil
+}
+
+// ParseDeadlineInput accepts the friendly forms people actually type and
+// canonicalizes them to YYYY-MM-DD. Supported forms are ISO dates, today,
+// tomorrow, weekday names (fri), relative days (+3d, in 3 days, 3d), next week,
+// and month-day forms such as "Nov 2" or "2 November".
+func ParseDeadlineInput(s string, now time.Time) (string, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "", nil
+	}
+	if t, err := time.ParseInLocation(DateLayout, s, time.Local); err == nil {
+		return t.Format(DateLayout), nil
+	}
+
+	today := StartOfDay(now)
+	lower := strings.ToLower(s)
+	switch lower {
+	case "today", "tod", "now":
+		return FormatDeadline(today), nil
+	case "tomorrow", "tmrw", "tmr", "tom":
+		return FormatDeadline(today.AddDate(0, 0, 1)), nil
+	case "next week":
+		return FormatDeadline(today.AddDate(0, 0, 7)), nil
+	}
+
+	if days, ok := parseRelativeDays(lower); ok {
+		return FormatDeadline(today.AddDate(0, 0, days)), nil
+	}
+	if days, ok := parseWeekday(lower, today); ok {
+		return FormatDeadline(today.AddDate(0, 0, days)), nil
+	}
+	if t, ok := parseMonthDay(lower, today); ok {
+		return FormatDeadline(t), nil
+	}
+
+	return "", fmt.Errorf("invalid deadline %q: try YYYY-MM-DD, tomorrow, fri, +3d, or next week", s)
+}
+
+func parseRelativeDays(s string) (int, bool) {
+	var raw string
+	switch {
+	case strings.HasPrefix(s, "+"):
+		raw = strings.TrimSuffix(strings.TrimPrefix(s, "+"), "d")
+	case strings.HasPrefix(s, "in "):
+		raw = strings.TrimPrefix(s, "in ")
+		raw = strings.TrimSuffix(strings.TrimSuffix(raw, " days"), " day")
+		raw = strings.TrimSpace(raw)
+	case strings.HasSuffix(s, "d"):
+		raw = strings.TrimSuffix(s, "d")
+	default:
+		return 0, false
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil || n < 0 {
+		return 0, false
+	}
+	return n, true
+}
+
+var weekdayAliases = map[string]time.Weekday{
+	"sun": time.Sunday, "sunday": time.Sunday,
+	"mon": time.Monday, "monday": time.Monday,
+	"tue": time.Tuesday, "tues": time.Tuesday, "tuesday": time.Tuesday,
+	"wed": time.Wednesday, "weds": time.Wednesday, "wednesday": time.Wednesday,
+	"thu": time.Thursday, "thur": time.Thursday, "thurs": time.Thursday, "thursday": time.Thursday,
+	"fri": time.Friday, "friday": time.Friday,
+	"sat": time.Saturday, "saturday": time.Saturday,
+}
+
+func parseWeekday(s string, today time.Time) (int, bool) {
+	s = strings.TrimSpace(strings.TrimPrefix(s, "next "))
+	wd, ok := weekdayAliases[s]
+	if !ok {
+		return 0, false
+	}
+	delta := (int(wd) - int(today.Weekday()) + 7) % 7
+	return delta, true
+}
+
+func parseMonthDay(s string, today time.Time) (time.Time, bool) {
+	cleaned := strings.ReplaceAll(s, ",", " ")
+	cleaned = strings.Join(strings.Fields(cleaned), " ")
+
+	for _, layout := range []string{"Jan 2 2006", "January 2 2006", "2 Jan 2006", "2 January 2006"} {
+		if t, err := time.ParseInLocation(layout, cleaned, time.Local); err == nil {
+			return t, true
+		}
+	}
+	for _, layout := range []string{"Jan 2", "January 2", "2 Jan", "2 January"} {
+		if t, err := time.ParseInLocation(layout, cleaned, time.Local); err == nil {
+			t = time.Date(today.Year(), t.Month(), t.Day(), 0, 0, 0, 0, time.Local)
+			if t.Before(today) {
+				t = t.AddDate(1, 0, 0)
+			}
+			return t, true
+		}
+	}
+	return time.Time{}, false
 }
 
 // FormatDeadline renders a time as YYYY-MM-DD in its own location.

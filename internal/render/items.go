@@ -14,7 +14,40 @@ type ProjectNamer func(id string) string
 
 // ItemTable writes the standard listing.
 func ItemTable(w io.Writer, items []model.Item, namer ProjectNamer, now time.Time) {
-	headers := []string{"ID", "TITLE", "DUE", "URG", "STATUS", "PRIO", "EST", "IMP", "PROJECT"}
+	itemTable(w, items, namer, now, nil)
+}
+
+// ItemTableNumbered writes the standard listing with a stable reference number
+// in the first column. numbers maps an item id to a number that callers can
+// resolve later with `clerify <command> #N`.
+func ItemTableNumbered(w io.Writer, items []model.Item, namer ProjectNamer, now time.Time, numbers map[string]int) {
+	itemTable(w, items, namer, now, numbers)
+}
+
+func itemTable(w io.Writer, items []model.Item, namer ProjectNamer, now time.Time, numbers map[string]int) {
+	hasImpact := false
+	hasProject := false
+	for _, it := range items {
+		if it.ImpactScore != nil {
+			hasImpact = true
+		}
+		if it.HasProject() {
+			hasProject = true
+		}
+	}
+
+	headers := make([]string, 0, 9)
+	if numbers != nil {
+		headers = append(headers, "#")
+	}
+	headers = append(headers, "ID", "TITLE", "DUE IN", "URG", "STATUS", "PRIORITY", "ESTIMATE")
+	if hasImpact {
+		headers = append(headers, "IMPACT")
+	}
+	if hasProject {
+		headers = append(headers, "PROJECT")
+	}
+
 	rows := make([][]string, 0, len(items))
 	boosted := false
 
@@ -22,41 +55,67 @@ func ItemTable(w io.Writer, items []model.Item, namer ProjectNamer, now time.Tim
 		if it.Boost.Active && it.Boost.BoostedPriorityScore != nil {
 			boosted = true
 		}
-		project := "—"
-		if it.HasProject() {
-			if namer != nil {
-				project = namer(*it.ProjectID)
+		row := make([]string, 0, len(headers))
+		if numbers != nil {
+			if n, ok := numbers[it.ID]; ok {
+				row = append(row, fmt.Sprintf("#%d", n))
 			} else {
-				project = *it.ProjectID
+				row = append(row, "—")
 			}
 		}
-		impact := "—"
-		if it.ImpactScore != nil {
-			impact = fmt.Sprintf("%d", *it.ImpactScore)
-		}
+
 		due := "—"
 		if it.Deadline != nil && *it.Deadline != "" {
 			due = *it.Deadline
 		}
-		score := ScoreCell(it)
-		if strings.Contains(score, "*") {
-			score = colorize(score, "36")
+		priority := PriorityLabel(it.EffectiveScore())
+		if it.Boost.Active && it.Boost.BoostedPriorityScore != nil {
+			priority += "*"
 		}
-		rows = append(rows, []string{
+		row = append(row,
 			ShortID(it.ID),
 			Truncate(it.Title, 44),
 			due,
 			colorUrgency(UrgencyCell(it, now)),
 			colorStatus(StatusCell(it)),
-			score,
+			priority,
 			Hours(it.EstimatedHours),
-			impact,
-			Truncate(project, 18),
-		})
+		)
+		if hasImpact {
+			impact := "—"
+			if it.ImpactScore != nil {
+				impact = fmt.Sprintf("%d", *it.ImpactScore)
+			}
+			row = append(row, impact)
+		}
+		if hasProject {
+			project := "—"
+			if it.HasProject() {
+				if namer != nil {
+					project = namer(*it.ProjectID)
+				} else {
+					project = *it.ProjectID
+				}
+			}
+			row = append(row, Truncate(project, 18))
+		}
+		rows = append(rows, row)
 	}
 	Table(w, headers, rows)
 	if boosted {
-		fmt.Fprintln(w, "* boosted priority score")
+		fmt.Fprintln(w, "* boosted priority: temporarily raised above the normal score")
+	}
+}
+
+// PriorityLabel turns the 0-100 score into a word most people can act on.
+func PriorityLabel(score int) string {
+	switch {
+	case score >= 70:
+		return "High"
+	case score >= 40:
+		return "Medium"
+	default:
+		return "Low"
 	}
 }
 

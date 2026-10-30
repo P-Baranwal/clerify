@@ -37,9 +37,11 @@ type editFlags struct {
 func (a *App) editCmd() *cobra.Command {
 	var f editFlags
 	cmd := &cobra.Command{
-		Use:   "edit <id>",
-		Short: "Change fields on an item",
-		Args:  exactArgs(1),
+		Use:               "edit <id>",
+		Short:             "Change fields on an item",
+		Example:           "  clerify edit #1 --due tomorrow\n  clerify edit #1 --status doing --est 4",
+		Args:              exactArgs(1),
+		ValidArgsFunction: a.completeItemIDs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := a.ensure(); err != nil {
 				return err
@@ -50,22 +52,25 @@ func (a *App) editCmd() *cobra.Command {
 	fl := cmd.Flags()
 	fl.StringVar(&f.title, "title", "", "new title")
 	fl.StringVar(&f.typ, "type", "", "new type")
-	fl.StringVar(&f.due, "due", "", "new deadline YYYY-MM-DD")
+	fl.StringVar(&f.due, "due", "", "new deadline: YYYY-MM-DD, tomorrow, fri, +3d, or next week")
 	fl.BoolVar(&f.clearDue, "clear-due", false, "remove the deadline")
 	fl.Float64Var(&f.est, "est", 0, "estimated hours")
 	fl.Float64Var(&f.actual, "actual", 0, "actual hours")
-	fl.IntVar(&f.impact, "impact", 0, "impact score 1-10")
+	fl.IntVar(&f.impact, "impact", 0, "impact score 1-10 (switches this item to impact-for-effort scoring)")
 	fl.BoolVar(&f.clearImpact, "clear-impact", false, "remove the impact score")
 	fl.IntVar(&f.priority, "priority", -1, "priority score 0-100")
 	fl.StringVar(&f.note, "note", "", "note")
 	fl.StringVar(&f.desc, "desc", "", "description")
 	fl.StringVar(&f.project, "project", "", "project id, prefix, or title")
 	fl.BoolVar(&f.clearProject, "clear-project", false, "detach from any project")
-	fl.StringVar(&f.status, "status", "", "status: todo|in_progress|blocked|done")
+	fl.StringVar(&f.status, "status", "", "status: todo|doing|in_progress|blocked|done")
 	fl.StringArrayVar(&f.checkAdd, "check-add", nil, "append checklist item (repeatable; commas are literal)")
 	fl.StringArrayVar(&f.checkRemove, "check-rm", nil, "remove checklist item by text (repeatable; commas are literal)")
 	fl.StringArrayVar(&f.checkDone, "check-done", nil, "mark checklist item done by text (repeatable; commas are literal)")
 	fl.StringArrayVar(&f.checkUndone, "check-undone", nil, "mark checklist item not done by text (repeatable; commas are literal)")
+	_ = cmd.RegisterFlagCompletionFunc("status", a.completeStatuses)
+	_ = cmd.RegisterFlagCompletionFunc("type", a.completeTypes)
+	_ = cmd.RegisterFlagCompletionFunc("project", a.completeProjectRefs)
 	return cmd
 }
 
@@ -133,7 +138,7 @@ func (a *App) applyEdit(cmd *cobra.Command, it *model.Item, f editFlags, now tim
 	if f.clearDue {
 		it.Deadline = nil
 	} else if cmd.Flags().Changed("due") {
-		due, err := model.ParseDeadlineStrict(f.due)
+		due, err := model.ParseDeadlineInput(f.due, now)
 		if err != nil {
 			return fail(2, err)
 		}
@@ -214,10 +219,27 @@ func (a *App) statusLeaf(use, status string, wantsNote bool) *cobra.Command {
 		note   string
 		actual float64
 	)
+	verb := strings.Fields(use)[0]
+	short := "Set status to " + status
+	switch verb {
+	case "todo":
+		short = "Move an item back to todo"
+	case "start":
+		short = "Mark an item as doing"
+	case "block":
+		short = "Mark an item blocked and note why"
+	case "unblock":
+		short = "Move a blocked item back to todo"
+	case "done":
+		short = "Mark an item done"
+	}
+	example := "  clerify " + strings.Replace(use, "<id>", "#1", 1)
 	cmd := &cobra.Command{
-		Use:   use,
-		Short: "Set status to " + status,
-		Args:  exactArgs(1),
+		Use:               use,
+		Short:             short,
+		Example:           example,
+		Args:              exactArgs(1),
+		ValidArgsFunction: a.completeItemIDs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := a.ensure(); err != nil {
 				return err
@@ -299,10 +321,12 @@ func applyStatus(it *model.Item, status, note string, now time.Time) {
 
 func (a *App) rmCmd() *cobra.Command {
 	return &cobra.Command{
-		Use:     "rm <id>...",
-		Aliases: []string{"delete"},
-		Short:   "Delete items (undoable)",
-		Args:    minArgs(1),
+		Use:               "rm <id>...",
+		Aliases:           []string{"delete"},
+		Short:             "Delete items (undoable)",
+		Example:           "  clerify rm #1\n  clerify rm 7f3a1b 9c2d4e",
+		Args:              minArgs(1),
+		ValidArgsFunction: a.completeItemIDs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := a.ensure(); err != nil {
 				return err
@@ -360,9 +384,10 @@ func (a *App) undoCmd() *cobra.Command {
 		n    int
 	)
 	cmd := &cobra.Command{
-		Use:   "undo",
-		Short: "Reverse the most recent mutation",
-		Args:  cobra.NoArgs,
+		Use:     "undo",
+		Short:   "Reverse the most recent mutation",
+		Example: "  clerify undo\n  clerify undo --list",
+		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := a.ensure(); err != nil {
 				return err

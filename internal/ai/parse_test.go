@@ -190,7 +190,7 @@ func TestBuildAnalyzePromptBoostBranch(t *testing.T) {
 	if !contains(user, "I am applying a boost") || contains(user, "ignored") {
 		t.Errorf("boost branch should replace the user message: %q", user)
 	}
-	if !contains(system, "COMPETENT student") || !contains(system, "NEVER estimate more than 40 hours") {
+	if !contains(system, "COMPETENT person") || !contains(system, "NEVER estimate more than 40 hours") {
 		t.Errorf("system prompt lost its load-bearing text")
 	}
 	if !contains(system, "Balanced") {

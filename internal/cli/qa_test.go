@@ -73,7 +73,7 @@ func clearKeyEnv(t *testing.T) {
 
 func TestInvalidDeadlineRejected(t *testing.T) {
 	dir := t.TempDir()
-	for _, due := range []string{"2026-11-2", "tomorrow", "11/02/2026"} {
+	for _, due := range []string{"2026-11-2", "blursday", "11/02/2026"} {
 		code, _, _ := runCLI(t, "", "--data-dir", dir, "add", "--title", "x", "--due", due, "--no-ai")
 		if code != 2 {
 			t.Errorf("--due %q exit = %d, want 2", due, code)
@@ -82,6 +82,21 @@ func TestInvalidDeadlineRejected(t *testing.T) {
 	code, _, errOut := runCLI(t, "", "--data-dir", dir, "add", "--title", "valid", "--due", "2026-11-02", "--no-ai")
 	if code != 0 {
 		t.Fatalf("valid deadline failed: %s", errOut)
+	}
+}
+
+func TestFriendlyDeadlineAccepted(t *testing.T) {
+	dir := t.TempDir()
+	code, _, errOut := runCLI(t, "", "--data-dir", dir, "add", "--title", "valid", "--due", "tomorrow", "--no-ai")
+	if code != 0 {
+		t.Fatalf("--due tomorrow failed: %s", errOut)
+	}
+	it := listItems(t, dir)[0]
+	if it.Deadline == nil {
+		t.Fatal("friendly deadline was not stored")
+	}
+	if _, err := model.ParseDeadlineStrict(*it.Deadline); err != nil {
+		t.Errorf("stored deadline %q is not canonical: %v", *it.Deadline, err)
 	}
 }
 

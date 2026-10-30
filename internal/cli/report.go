@@ -40,8 +40,14 @@ func (a *App) reportCmd() *cobra.Command {
 	)
 	cmd := &cobra.Command{
 		Use:   "report [section...]",
-		Short: "Analytics: velocity, accuracy, projects, streaks, calibration, insights",
-		Args:  cobra.ArbitraryArgs,
+		Short: "Analytics: pace, estimate accuracy, projects, streaks, calibration, insights",
+		Long: `A plain-language report. "Velocity" is your finishing pace, "accuracy"
+compares estimates with actual hours, and "calibration" shows whether you tend
+to underestimate or overestimate.`,
+		Example: `  clerify report
+  clerify report velocity accuracy --last 4
+  clerify report --md`,
+		Args: cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := a.ensure(); err != nil {
 				return err
@@ -120,9 +126,10 @@ type digestOutput struct {
 func (a *App) digestCmd() *cobra.Command {
 	var week bool
 	cmd := &cobra.Command{
-		Use:   "digest",
-		Short: "One-screen summary, suitable for cron",
-		Args:  cobra.NoArgs,
+		Use:     "digest",
+		Short:   "One-screen summary, suitable for cron",
+		Example: "  clerify digest\n  clerify digest --week",
+		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := a.ensure(); err != nil {
 				return err
@@ -194,9 +201,10 @@ func (a *App) exportCmd() *cobra.Command {
 		out   string
 	)
 	cmd := &cobra.Command{
-		Use:   "export",
-		Short: "Dump the store or item data",
-		Args:  cobra.NoArgs,
+		Use:     "export",
+		Short:   "Dump the store or item data",
+		Example: "  clerify export --csv > tasks.csv\n  clerify export --ics > deadlines.ics",
+		Args:    cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := a.ensure(); err != nil {
 				return err
@@ -245,9 +253,10 @@ func (a *App) importCmd() *cobra.Command {
 		fromCSV bool
 	)
 	cmd := &cobra.Command{
-		Use:   "import <file>",
-		Short: "Restore a store, a web-app export, or a CSV",
-		Args:  exactArgs(1),
+		Use:     "import <file>",
+		Short:   "Restore a store, a web-app export, or a CSV",
+		Example: "  clerify import backup.json\n  clerify import tasks.csv --from-csv --merge",
+		Args:    exactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			if err := a.ensure(); err != nil {
 				return err

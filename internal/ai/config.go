@@ -185,14 +185,14 @@ func ApplyPreset(name string) (Config, bool) {
 	return cfg, true
 }
 
-// DefaultConfig is the current app's default provider.
+// DefaultConfig is the provider used when no config.json exists yet.
 func DefaultConfig() Config {
 	cfg := baseConfig()
-	cfg.Preset = "sarvam"
-	cfg.BaseURL = "https://api.sarvam.ai/v1"
-	cfg.Model = "sarvam-105b"
-	cfg.AuthHeader = "api-subscription-key"
-	cfg.ExtraBody = map[string]any{"reasoning_effort": nil}
+	cfg.Preset = "openai"
+	cfg.BaseURL = "https://api.openai.com/v1"
+	cfg.Model = "gpt-4o-mini"
+	cfg.AuthHeader = "Authorization"
+	cfg.AuthPrefix = "Bearer"
 	return cfg
 }
 
