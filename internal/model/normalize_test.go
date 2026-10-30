@@ -178,3 +178,85 @@ func TestReconcileChecklistPreservesProgress(t *testing.T) {
 		t.Errorf("new item not created: %+v", got[2])
 	}
 }
+
+func TestParseStatusStrict(t *testing.T) {
+	cases := map[string]string{
+		"todo":        StatusTodo,
+		"active":      StatusTodo,
+		"in_progress": StatusInProgress,
+		"doing":       "",
+		"blocked":     StatusBlocked,
+		"done":        StatusDone,
+		"completed":   StatusDone,
+		"donee":       "",
+	}
+	for in, want := range cases {
+		got, err := ParseStatus(in)
+		if want == "" {
+			if err == nil {
+				t.Errorf("ParseStatus(%q) should fail", in)
+			}
+			continue
+		}
+		if err != nil || got != want {
+			t.Errorf("ParseStatus(%q) = %q, %v; want %q", in, got, err, want)
+		}
+	}
+}
+
+func TestStrictParsers(t *testing.T) {
+	if got, err := ParseType("essay"); err != nil || got != TypeEssay {
+		t.Errorf("ParseType(essay) = %q, %v", got, err)
+	}
+	if _, err := ParseType("nonsense"); err == nil {
+		t.Error("ParseType should reject a typo")
+	}
+	if got, err := ParsePreset("Deadline First"); err != nil || got != PresetDeadlineFirst {
+		t.Errorf("ParsePreset = %q, %v", got, err)
+	}
+	if _, err := ParsePreset("whatever"); err == nil {
+		t.Error("ParsePreset should reject a typo")
+	}
+	if got, err := ParseTheme("dark"); err != nil || got != ThemeDark {
+		t.Errorf("ParseTheme = %q, %v", got, err)
+	}
+	if _, err := ParseTheme("neon"); err == nil {
+		t.Error("ParseTheme should reject a typo")
+	}
+	if err := ValidateHours(0); err == nil {
+		t.Error("ValidateHours(0) should fail")
+	}
+	if err := ValidateHours(99); err == nil {
+		t.Error("ValidateHours(99) should fail")
+	}
+}
+
+func TestParseDeadlineStrict(t *testing.T) {
+	if got, err := ParseDeadlineStrict("2026-11-02"); err != nil || got != "2026-11-02" {
+		t.Errorf("valid = %q, %v", got, err)
+	}
+	for _, bad := range []string{"2026-11-2", "tomorrow", "2026-02-30"} {
+		if _, err := ParseDeadlineStrict(bad); err == nil {
+			t.Errorf("ParseDeadlineStrict(%q) should fail", bad)
+		}
+	}
+}
+
+func TestCompletedAtLifecycle(t *testing.T) {
+	completed := NowRFC3339(time.Date(2026, 10, 20, 12, 0, 0, 0, time.Local))
+	done := NormalizeItem(Item{Title: "x", Status: StatusDone, CompletedAt: &completed})
+	if done.CompletedAt == nil || *done.CompletedAt != completed {
+		t.Errorf("done item lost completedAt: %+v", done.CompletedAt)
+	}
+	todo := NormalizeItem(Item{Title: "x", Status: StatusTodo, CompletedAt: &completed})
+	if todo.CompletedAt != nil {
+		t.Errorf("non-done item kept completedAt: %+v", todo.CompletedAt)
+	}
+}
+
+func TestCompletionTimeFallsBackToUpdatedAt(t *testing.T) {
+	it := Item{Status: StatusDone, UpdatedAt: "2026-10-21T09:00:00Z"}
+	if got := it.CompletionTime(); !got.Equal(time.Date(2026, 10, 21, 9, 0, 0, 0, time.UTC)) {
+		t.Errorf("fallback = %v", got)
+	}
+}

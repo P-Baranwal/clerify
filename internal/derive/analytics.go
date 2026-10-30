@@ -32,7 +32,7 @@ func Velocity(items []model.Item, now time.Time, weeks int) []VelocityBucket {
 			if !it.IsDone() {
 				continue
 			}
-			t := timeValue(it.UpdatedAt)
+			t := it.CompletionTime()
 			if !t.IsZero() && !t.Before(start) && !t.After(end) {
 				count++
 			}
@@ -64,7 +64,7 @@ func Accuracy(items []model.Item) []AccuracyRow {
 	agg := make(map[string]*AccuracyRow)
 
 	for _, it := range items {
-		if !it.IsDone() || it.EstimatedHours <= 0 {
+		if !it.IsDone() || it.EstimatedHours <= 0 || it.ActualHours <= 0 {
 			continue
 		}
 		kind := it.Type
@@ -77,12 +77,8 @@ func Accuracy(items []model.Item) []AccuracyRow {
 			agg[kind] = row
 			order = append(order, kind)
 		}
-		actual := it.ActualHours
-		if actual == 0 {
-			actual = it.EstimatedHours
-		}
 		row.Estimated += it.EstimatedHours
-		row.Actual += actual
+		row.Actual += it.ActualHours
 		row.Count++
 	}
 
@@ -120,7 +116,7 @@ func ProjectBreakdown(items []model.Item, projects []model.Project, now time.Tim
 		if !it.IsDone() {
 			continue
 		}
-		t := timeValue(it.UpdatedAt)
+		t := it.CompletionTime()
 		if t.IsZero() || t.Before(cutoff) {
 			continue
 		}
@@ -170,7 +166,7 @@ func Streak(items []model.Item, now time.Time) int {
 		if !it.IsDone() {
 			continue
 		}
-		t := timeValue(it.UpdatedAt)
+		t := it.CompletionTime()
 		if t.IsZero() {
 			continue
 		}

@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/P-Baranwal/clerify/internal/format"
 	"github.com/P-Baranwal/clerify/internal/model"
 )
 
@@ -208,19 +209,19 @@ func BuildAnalyzePrompt(in AnalyzeInput, now time.Time) (system, user, feature s
 	})
 	system = strings.TrimSpace(system)
 
+	quoted, _ := json.Marshal(in.RawContent)
 	user = strings.TrimSpace(`Analyze this assignment. Think through the subtasks mentally first to ground your
 time estimate, then output the JSON.
 
-Assignment text:
-"""
-` + in.RawContent + `
-"""`)
+Assignment text (JSON-encoded):
+` + string(quoted))
 
 	feature = "priority_score"
 	if strings.TrimSpace(in.BoostReason) != "" && in.ExistingContext != nil {
 		existing, _ := json.Marshal(in.ExistingContext)
-		user = "I am applying a boost to this previously analyzed assignment. The boost reason is: \"" +
-			in.BoostReason + "\". Existing data: " + string(existing) +
+		reason, _ := json.Marshal(in.BoostReason)
+		user = "I am applying a boost to this previously analyzed assignment. The boost reason is: " +
+			string(reason) + ". Existing data: " + string(existing) +
 			". Recalculate priorityScore to reflect this boost, and update priorityReasoning. Return the complete updated JSON schema."
 		feature = "re_analyze"
 	}
@@ -250,7 +251,7 @@ func BuildWeeklyPlanPrompt(profile model.Profile, items []model.Item, now time.T
 			deadline = *it.Deadline
 		}
 		lines = append(lines, fmt.Sprintf(`- "%s" (type: %s, deadline: %s, est: %sh, priority: %d, status: %s)`,
-			it.Title, kind, deadline, trimFloat(it.EstimatedHours), it.EffectiveScore(), it.Status))
+			it.Title, kind, deadline, format.TrimFloat(it.EstimatedHours), it.EffectiveScore(), it.Status))
 	}
 	summary := strings.Join(lines, "\n")
 	if summary == "" {
@@ -273,10 +274,7 @@ func BuildWBSPrompt(brief string, now time.Time) (system, user string) {
 	system = render(wbsSystemPrompt, map[string]string{
 		"CURRENT_DATE": now.Format(model.DateLayout),
 	})
-	user = "Client brief / feature request:\n\"\"\"\n" + brief + "\n\"\"\""
+	quoted, _ := json.Marshal(brief)
+	user = "Client brief / feature request (JSON-encoded):\n" + string(quoted)
 	return strings.TrimSpace(system), user
-}
-
-func trimFloat(v float64) string {
-	return strings.TrimRight(strings.TrimRight(fmt.Sprintf("%.2f", v), "0"), ".")
 }

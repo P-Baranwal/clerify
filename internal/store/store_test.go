@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 
 	"github.com/P-Baranwal/clerify/internal/model"
@@ -140,7 +142,7 @@ func TestSaveWritesBackupAndIsValidJSON(t *testing.T) {
 	}
 }
 
-func TestJournalUndoRoundTrip(t *testing.T) {
+func TestJournalUndoConsumesEntry(t *testing.T) {
 	db, paths := openTemp(t)
 	it, err := db.AddItem(model.NewItem("journaled"))
 	if err != nil {
@@ -158,15 +160,15 @@ func TestJournalUndoRoundTrip(t *testing.T) {
 		t.Errorf("entry = %+v", last)
 	}
 
-	if err := Append(paths, Entry{TS: "now", Op: OpUndo}); err != nil {
+	if err := Append(paths, Entry{TS: "now", Op: OpUndo, UndoSeq: last.Seq}); err != nil {
 		t.Fatal(err)
 	}
 	next, err := LastUndoable(paths)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if next == nil || next.Op != OpCreate {
-		t.Errorf("undo markers should be skipped: %+v", next)
+	if next != nil {
+		t.Errorf("an undone entry must not be returned again: %+v", next)
 	}
 }
 
@@ -245,5 +247,129 @@ func TestDetectDocumentKinds(t *testing.T) {
 	}
 	if IsLegacyExport([]byte(`{"items":[]}`)) {
 		t.Error("false positive")
+	}
+}
+
+func TestConcurrentMutationsDoNotLoseUpdates(t *testing.T) {
+	db1, paths := openTemp(t)
+	it, err := db1.AddItem(model.NewItem("base"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	db2, err := Open(paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	errs := make(chan error, 2)
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		<-start
+		_, err := db1.MutateItem(it.ID, func(cur *model.Item) error {
+			cur.Title = "from one"
+			return nil
+		})
+		errs <- err
+	}()
+	go func() {
+		defer wg.Done()
+		<-start
+		_, err := db2.MutateItem(it.ID, func(cur *model.Item) error {
+			cur.Notes = "from two"
+			return nil
+		})
+		errs <- err
+	}()
+	close(start)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	reopened, err := Open(paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, ok := reopened.ItemByID(it.ID)
+	if !ok {
+		t.Fatal("item disappeared")
+	}
+	if got.Title != "from one" || got.Notes != "from two" {
+		t.Errorf("lost an update: %+v", got)
+	}
+}
+
+func TestCorruptRecoveryPreservesBackup(t *testing.T) {
+	paths, err := ResolvePaths(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(paths.Dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	backup := model.Store{
+		SchemaVersion: model.SchemaVersion,
+		Profile:       model.NormalizeProfile(model.Profile{}),
+		Items:         []model.Item{model.NormalizeItem(model.Item{ID: "abc", Title: "from backup"})},
+		Projects:      []model.Project{},
+	}
+	good, _ := json.Marshal(backup)
+	if err := os.WriteFile(paths.BackupFile, good, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(paths.StoreFile, []byte("{not json"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	db, err := Open(paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.AddItem(model.NewItem("after recovery")); err != nil {
+		t.Fatal(err)
+	}
+
+	after, err := os.ReadFile(paths.BackupFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(good) {
+		t.Error("the good backup was overwritten during recovery")
+	}
+	matches, _ := filepath.Glob(paths.StoreFile + ".corrupt-*")
+	if len(matches) != 1 {
+		t.Errorf("corrupt store was not quarantined: %v", matches)
+	}
+}
+
+func TestJournalHandlesLongEntry(t *testing.T) {
+	_, paths := openTemp(t)
+	it := model.NewItem("huge")
+	it.RawContent = strings.Repeat("x", 5<<20)
+	if err := Append(paths, Entry{TS: "now", Op: OpDelete, Before: &it}); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := ReadJournal(paths)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Before == nil || len(entries[0].Before.RawContent) != len(it.RawContent) {
+		t.Errorf("long journal entry was truncated")
+	}
+}
+
+func TestJournalAppendReturnsReadError(t *testing.T) {
+	_, paths := openTemp(t)
+	if err := os.MkdirAll(paths.JournalFile, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := Append(paths, Entry{TS: "now", Op: OpCreate}); err == nil {
+		t.Fatal("expected a read error, not a silently truncated journal")
 	}
 }

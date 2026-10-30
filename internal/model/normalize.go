@@ -4,6 +4,8 @@ import (
 	"math"
 	"strconv"
 	"strings"
+
+	"github.com/P-Baranwal/clerify/internal/format"
 )
 
 // NormalizeItem clamps and fills an item so that persisted data is always
@@ -41,7 +43,7 @@ func NormalizeItem(in Item) Item {
 		score := clampInt(int(math.Round((float64(v)/hoursFloor)*10)), MinPriority, MaxPriority)
 		out.PriorityScore = score
 		out.PriorityReasoning = "ROI Priority: " + strconv.Itoa(v) + " impact vs " +
-			formatFloat(out.EstimatedHours) + "h estimated effort."
+			format.Number(out.EstimatedHours) + "h estimated effort."
 	}
 
 	out.Boost = normalizeBoost(out.Boost)
@@ -49,12 +51,9 @@ func NormalizeItem(in Item) Item {
 	out.ProjectID = normalizeOptionalID(out.ProjectID)
 	out.BlockerNote = normalizeNote(out.BlockerNote)
 
-	if out.Status != StatusBlocked {
-		// The web app clears the note only on explicit status changes; keeping
-		// a note on an unblocked item would be unreachable state, so drop it.
-		if out.BlockerNote != nil && strings.TrimSpace(*out.BlockerNote) == "" {
-			out.BlockerNote = nil
-		}
+	out.CompletedAt = normalizeNote(out.CompletedAt)
+	if out.Status != StatusDone {
+		out.CompletedAt = nil
 	}
 
 	return out
@@ -152,10 +151,6 @@ func normalizeBoost(b Boost) Boost {
 		v := clampInt(*out.BoostedPriorityScore, MinPriority, MaxPriority)
 		out.BoostedPriorityScore = &v
 	}
-	if !out.Active {
-		// Keep the historical values (the web app does), but they have no
-		// effect because EffectiveScore requires Active.
-	}
 	return out
 }
 
@@ -234,8 +229,4 @@ func clampFloat(v, min, max float64) float64 {
 		return max
 	}
 	return v
-}
-
-func formatFloat(v float64) string {
-	return strconv.FormatFloat(v, 'f', -1, 64)
 }

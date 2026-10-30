@@ -7,6 +7,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/P-Baranwal/clerify/internal/derive"
+	"github.com/P-Baranwal/clerify/internal/model"
 	"github.com/P-Baranwal/clerify/internal/render"
 )
 
@@ -57,9 +58,26 @@ func (a *App) runLs(cmd *cobra.Command, args []string, statuses []string, projec
 		return fail(2, fmt.Errorf("unknown sort key %q (use priority, due, updated, roi, or title)", sortKey))
 	}
 
+	canonicalStatuses := make([]string, 0, len(statuses))
+	for _, s := range statuses {
+		st, err := model.ParseStatus(s)
+		if err != nil {
+			return fail(2, err)
+		}
+		canonicalStatuses = append(canonicalStatuses, st)
+	}
+	canonicalType := ""
+	if strings.TrimSpace(typeFilter) != "" {
+		typ, err := model.ParseType(typeFilter)
+		if err != nil {
+			return fail(2, err)
+		}
+		canonicalType = typ
+	}
+
 	filter := derive.Filter{
-		Statuses:    statuses,
-		Type:        typeFilter,
+		Statuses:    canonicalStatuses,
+		Type:        canonicalType,
 		Overdue:     overdue,
 		Query:       strings.Join(args, " "),
 		IncludeDone: includeAll,

@@ -6,8 +6,8 @@ No account, no server, no database. Everything lives in one JSON file you own,
 and the only network call the tool ever makes is to the AI endpoint you
 configure.
 
-Ported from the Clerify web app at `assistant-manager@6bedb5c`; the prompts and
-scoring rules are intentionally carried over verbatim.
+Untrusted assignment/brief text is JSON-encoded in the user message so it cannot
+close the prompt block.
 
 ## Install
 
@@ -36,8 +36,8 @@ clerify done 7f3a1b --actual 9
 clerify undo
 ```
 
-Every command accepts `--json` for scripting and `--dry-run` for anything that
-would call the AI.
+Every command accepts `--json` for scripting, `--no-color` to disable ANSI
+output, and `--dry-run` for anything that would call the AI.
 
 ## Data
 
@@ -48,12 +48,15 @@ directory (`~/.config/clerify` on Linux).
 |---|---|---|
 | `store.json` | items, projects, profile, cached plan | `0644` |
 | `config.json` | AI provider settings and API key | `0600` |
-| `journal.jsonl` | last 50 mutations, used by `undo` | `0600` |
+| `journal.jsonl` | last 50 journal entries, used by `undo` | `0600` |
 | `store.json.bak` | previous store, written on every save | `0644` |
 
-Writes are atomic (temp file + fsync + rename) and guarded by an advisory lock,
-so an interrupted command cannot truncate your data. If `store.json` is ever
-corrupt, `clerify` recovers from `store.json.bak` and tells you.
+Writes are atomic (temp file + fsync + rename) and transactional: the store lock
+covers load, mutation, save, and the journal append, so two terminals cannot
+silently overwrite each other. The schema is version 2; `CompletedAt` is stored
+separately from `UpdatedAt`, and older stores are migrated on open. If
+`store.json` is ever corrupt, `clerify` recovers from `store.json.bak`, saves the
+corrupt file as `store.json.corrupt-<timestamp>`, and tells you.
 
 ## AI providers
 
@@ -79,7 +82,13 @@ pre-fill the base URL, auth header, and default model:
 | `custom` | you supply | you supply |
 
 Keys are resolved in this order: `--api-key`, `CLERIFY_API_KEY`,
-`<PRESET>_API_KEY`, then `config.json`.
+`<PRESET>_API_KEY`, then `config.json`. The four local presets set `no_auth`,
+so they work without a key and send no authentication header.
+
+Switching presets clears the previous provider's key, so an OpenAI key is never
+sent to DeepSeek's endpoint. Provider-specific body fields such as Sarvam's
+`reasoning_effort` are applied only by that preset and can be removed by
+editing `config.json`.
 
 Anything OpenAI-compatible works without a preset:
 
@@ -107,69 +116,50 @@ $EDITOR ~/.config/clerify/config.json   # ai.extra_body, ai.extra_headers, ai.re
 | `edit <id>` | change any field; checklist ops via `--check-add/--check-rm/--check-done/--check-undone` |
 | `todo/start/block/unblock/done <id>` | status transitions (`block --note`, `done --actual`) |
 | `rm <id>...` | delete; undoable |
-| `undo` | reverse the last mutation (`--list` to inspect) |
+| `undo` | reverse the most recent un-undone mutation (`--list` to inspect) |
 | `boost <id> --reason "..."` | temporary priority bump (`--clear` to drop it) |
-| `rescore` | re-run AI scoring in bulk |
-| `today` | overdue, due today, top 5, capacity risk, today's plan |
+| `rescore` | re-run AI scoring in bulk; `--include-empty` opts title-only items in |
+| `today` | overdue, due today, top 5, inbox, high ROI, capacity risk, today's plan |
 | `plan [--refresh]` | weekly plan, persisted between runs |
 | `calendar [--month YYYY-MM]` | month grid with deadline chips |
-| `project new/ls/show/done/rm` | projects |
+| `project new/ls/show/done/rm` | projects; `project show --board` groups items by status |
 | `wbs [project] --apply` | generate a work breakdown and create the items |
-| `report [section...]` | velocity, accuracy, projects, streaks, calibration, insights |
+| `report [section...]` | velocity, accuracy, projects, streaks, calibration, insights (`--last`, `--md`) |
 | `digest [--week]` | one-screen summary for cron |
-| `export [--json\|--csv\|--ics]` | dump the store, an item CSV, or an iCalendar feed |
-| `import <file> [--merge] [--from-csv]` | restore a store, a web-app export, or a CSV |
+| `export [--json\|--csv\|--ics]` | dump the store, a lossless item CSV, or an iCalendar feed |
+| `import <file> [--merge] [--from-csv]` | restore a store or a CSV |
 | `config show/set/path` | profile and file locations |
 | `ai preset/key/test/models/show` | provider setup |
 | `doctor` | diagnose the local setup |
-| `tui` | interactive UI (build with `-tags tui`; not implemented yet) |
+| `tui` | interactive UI (not implemented yet) |
 
 Exit codes: `0` ok, `1` runtime error, `2` usage, `3` not found / ambiguous id,
 `4` AI or configuration error, `5` unreadable store, `6` lock timeout.
 
 Ids may be abbreviated to any unique prefix.
 
-## Importing from the web app
+## CSV round-trips
 
-`Settings → Export` produces a `_exportVersion: 2` backup. Point `import` at it:
+`export --csv` writes every user-visible item field: id, title, type, status,
+priority, estimate/actual hours, deadline, timestamps, impact, difficulty,
+notes, description, project id, checklist (including done state), analysis and
+blocker metadata, boost fields, and raw content. Cells beginning with `=`, `+`,
+`-`, or `@` are prefixed with `'` to prevent spreadsheet formula injection; the
+prefix is removed on import.
 
-```sh
-clerify import assistant-manager-backup.json --yes
-clerify import assistant-manager-backup.json --merge   # upsert by id instead
-```
-
-The current store is copied to `store.json.bak.<timestamp>` before anything is
-written. Assignments and tasks are merged into one item collection; `active`
-becomes `todo`; cloud-only fields (teams, billing, subscription) are dropped.
-
-## Differences from the web app
-
-These are deliberate fixes, not regressions:
-
-1. **One item type and one status vocabulary.** `assignments` and `tasks` merge,
-   and legacy `active` maps to `todo`. The web app's task form wrote `active`,
-   which its own kanban never displayed.
-2. **Priority presets are canonical.** The web app's Settings screen emitted
-   `Deadline First` while its model expected `Deadline-first`, silently saving
-   `Balanced`; the CLI accepts both spellings and stores the canonical one.
-3. **Checklist progress survives re-analysis** (matched by item text) instead of
-   being reset to unchecked.
-4. **Undo is a journal**, not a single 8-second toast. The last 50 mutations are
-   reversible.
-5. **The weekly plan is persisted** with its generation time.
-6. **CSV output is properly quoted** (`encoding/csv`) and re-importable.
-7. **The "No Project" report bucket respects the 30-day window** like every
-   other bucket.
-8. **PDF text has one configurable limit** (`ai.max_input_chars`, default 30000)
-   instead of the browser's 5k/10k caps, and works offline.
-9. **Deterministic sort tiebreaks**, so output is stable.
+`import <file> --from-csv` treats a CSV as item data. In replace mode it leaves
+the existing project collection alone, because a CSV has no project list.
+`--merge` keeps a local item when its `updatedAt` is newer than the incoming
+one, so restoring an older backup cannot clobber recent edits.
 
 ## Development
 
 ```sh
 make check          # gofmt check, vet, tests
 make build
+go test -race ./... # store concurrency coverage
 go test ./... -run TestParseLegacyExport -v
+go mod tidy
 ```
 
 Layout:
@@ -183,6 +173,8 @@ internal/derive    ranking, ROI, risk, analytics, calendar
 internal/render    tables, calendar grid, plan and report output
 internal/cli       cobra commands
 internal/pdf       pdftotext + pure-Go fallback
+internal/format     shared number/duration formatting
+internal/atomicfile atomic temp-file + rename helper
 ```
 
 The AI prompts in `internal/ai/prompts.go` are the valuable asset — they carry

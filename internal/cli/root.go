@@ -14,6 +14,7 @@ import (
 	"github.com/P-Baranwal/clerify/internal/ai"
 	"github.com/P-Baranwal/clerify/internal/config"
 	"github.com/P-Baranwal/clerify/internal/model"
+	"github.com/P-Baranwal/clerify/internal/render"
 	"github.com/P-Baranwal/clerify/internal/store"
 )
 
@@ -82,14 +83,12 @@ func ExecuteArgs(args []string, out, errOut io.Writer, in io.Reader) int {
 	if err := root.Execute(); err != nil {
 		var exitErr *ExitError
 		if errors.As(err, &exitErr) {
-			if exitErr.Err != nil && !app.flags.Quiet {
+			if exitErr.Err != nil {
 				fmt.Fprintln(app.Err, "error:", exitErr.Err)
 			}
 			return exitErr.Code
 		}
-		if !app.flags.Quiet {
-			fmt.Fprintln(app.Err, "error:", err)
-		}
+		fmt.Fprintln(app.Err, "error:", err)
 		return codeFor(err)
 	}
 	return 0
@@ -105,6 +104,9 @@ func codeFor(err error) int {
 	}
 	if errors.Is(err, store.ErrLockTimeout) {
 		return 6
+	}
+	if errors.Is(err, store.ErrUnreadable) {
+		return 5
 	}
 	var cfgErr *ai.ConfigError
 	var apiErr *ai.APIError
@@ -195,7 +197,24 @@ func (a *App) ensure() error {
 		}
 	}
 	a.Paths, a.Cfg, a.DB = paths, cfg, db
+	render.SetOptions(render.Options{
+		Color:      !a.flags.NoColor && os.Getenv("NO_COLOR") == "" && isTerminal(a.Out),
+		TableStyle: cfg.UI.TableStyle,
+		DateFormat: cfg.UI.DateFormat,
+	})
 	return nil
+}
+
+func isTerminal(w io.Writer) bool {
+	f, ok := w.(*os.File)
+	if !ok {
+		return false
+	}
+	info, err := f.Stat()
+	if err != nil {
+		return false
+	}
+	return info.Mode()&os.ModeCharDevice != 0
 }
 
 // printf writes to stdout unless --quiet.
@@ -216,13 +235,10 @@ func (a *App) printJSON(v any) error {
 // aiClient builds a client from config plus per-invocation overrides.
 func (a *App) aiClient() *ai.Client {
 	cfg := a.Cfg.AI
-	if a.flags.APIKey != "" {
-		cfg.APIKey = a.flags.APIKey
-	}
 	if a.flags.Timeout > 0 {
 		cfg.TimeoutSeconds = int(a.flags.Timeout.Seconds())
 	}
-	return ai.New(cfg)
+	return ai.NewWithKey(cfg, a.flags.APIKey)
 }
 
 // now returns the injectable clock.
@@ -231,28 +247,6 @@ func (a *App) now() time.Time {
 		return a.Now()
 	}
 	return time.Now()
-}
-
-// journalItem records a reversible item mutation.
-func (a *App) journalItem(op, label string, before, after *model.Item) {
-	_ = store.Append(a.Paths, store.Entry{
-		TS:     a.now().Format(time.RFC3339),
-		Op:     op,
-		Label:  label,
-		Before: before,
-		After:  after,
-	})
-}
-
-// journalProject records a reversible project mutation.
-func (a *App) journalProject(op, label string, before, after *model.Project) {
-	_ = store.Append(a.Paths, store.Entry{
-		TS:            a.now().Format(time.RFC3339),
-		Op:            op,
-		Label:         label,
-		ProjectBefore: before,
-		ProjectAfter:  after,
-	})
 }
 
 // exactArgs returns a positional-args validator that exits with code 2.

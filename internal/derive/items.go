@@ -49,7 +49,7 @@ func Completed(items []model.Item) []model.Item {
 		}
 	}
 	sort.SliceStable(out, func(a, b int) bool {
-		return timeValue(out[a].UpdatedAt).After(timeValue(out[b].UpdatedAt))
+		return out[a].CompletionTime().After(out[b].CompletionTime())
 	})
 	return out
 }
@@ -244,7 +244,7 @@ func Kanban(items []model.Item) Board {
 		}
 	}
 	sort.SliceStable(b.Done, func(i, j int) bool {
-		return timeValue(b.Done[i].UpdatedAt).After(timeValue(b.Done[j].UpdatedAt))
+		return b.Done[i].CompletionTime().After(b.Done[j].CompletionTime())
 	})
 	if len(b.Done) > 10 {
 		b.Done = b.Done[:10]

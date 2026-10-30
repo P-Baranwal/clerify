@@ -17,14 +17,22 @@ import (
 // API. Nothing vendor-specific lives outside the preset table.
 type Client struct {
 	cfg  Config
+	key  string
 	HTTP *http.Client
 }
 
 // New builds a client, applying defaults.
 func New(cfg Config) *Client {
+	return NewWithKey(cfg, "")
+}
+
+// NewWithKey builds a client with an explicit key override. The override wins
+// over every environment variable and the config file, matching the CLI help.
+func NewWithKey(cfg Config, override string) *Client {
 	cfg.Normalize()
 	return &Client{
 		cfg:  cfg,
+		key:  ResolveKey(cfg, override),
 		HTTP: &http.Client{Timeout: time.Duration(cfg.TimeoutSeconds) * time.Second},
 	}
 }
@@ -39,8 +47,8 @@ func (c *Client) KeyEnvName() string { return keyEnvName(c.cfg) }
 // feature is accepted for parity with the web app's call sites; it has no
 // wire effect.
 func (c *Client) Analyze(ctx context.Context, system, user, feature string) (string, error) {
-	key := ResolveKey(c.cfg, "")
-	if key == "" {
+	key := c.key
+	if key == "" && !c.cfg.NoAuth {
 		return "", &ConfigError{Message: fmt.Sprintf("no API key configured; set %s or run `clerify ai key`", keyEnvName(c.cfg))}
 	}
 	if strings.TrimSpace(c.cfg.BaseURL) == "" {
@@ -103,7 +111,9 @@ func (c *Client) do(ctx context.Context, system, user, key string) (string, erro
 				{"role": "user", "content": user},
 			},
 		}
-		headers["x-api-key"] = key
+		if !c.cfg.NoAuth && key != "" {
+			headers["x-api-key"] = key
+		}
 		headers["anthropic-version"] = "2023-06-01"
 	} else {
 		endpoint += "/chat/completions"
@@ -119,14 +129,16 @@ func (c *Client) do(ctx context.Context, system, user, key string) (string, erro
 		if c.wantJSONMode() {
 			body["response_format"] = map[string]string{"type": "json_object"}
 		}
-		if c.cfg.AuthHeader != "" {
-			value := key
-			if c.cfg.AuthPrefix != "" {
-				value = c.cfg.AuthPrefix + " " + key
+		if !c.cfg.NoAuth && key != "" {
+			if c.cfg.AuthHeader != "" {
+				value := key
+				if c.cfg.AuthPrefix != "" {
+					value = c.cfg.AuthPrefix + " " + key
+				}
+				headers[c.cfg.AuthHeader] = value
+			} else {
+				headers["Authorization"] = "Bearer " + key
 			}
-			headers[c.cfg.AuthHeader] = value
-		} else {
-			headers["Authorization"] = "Bearer " + key
 		}
 	}
 
@@ -188,7 +200,7 @@ func (c *Client) do(ctx context.Context, system, user, key string) (string, erro
 // ListModels queries /models when the provider supports it. Providers without
 // the endpoint return an error, which the CLI reports as unsupported.
 func (c *Client) ListModels(ctx context.Context) ([]string, error) {
-	key := ResolveKey(c.cfg, "")
+	key := c.key
 	endpoint := strings.TrimRight(c.cfg.BaseURL, "/") + "/models"
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
@@ -196,17 +208,19 @@ func (c *Client) ListModels(ctx context.Context) ([]string, error) {
 		return nil, err
 	}
 	headers := map[string]string{"Content-Type": "application/json"}
-	if c.cfg.Wire == WireAnthropic {
-		headers["x-api-key"] = key
-		headers["anthropic-version"] = "2023-06-01"
-	} else if c.cfg.AuthHeader != "" {
-		value := key
-		if c.cfg.AuthPrefix != "" {
-			value = c.cfg.AuthPrefix + " " + key
+	if !c.cfg.NoAuth && key != "" {
+		if c.cfg.Wire == WireAnthropic {
+			headers["x-api-key"] = key
+			headers["anthropic-version"] = "2023-06-01"
+		} else if c.cfg.AuthHeader != "" {
+			value := key
+			if c.cfg.AuthPrefix != "" {
+				value = c.cfg.AuthPrefix + " " + key
+			}
+			headers[c.cfg.AuthHeader] = value
+		} else {
+			headers["Authorization"] = "Bearer " + key
 		}
-		headers[c.cfg.AuthHeader] = value
-	} else {
-		headers["Authorization"] = "Bearer " + key
 	}
 	for k, v := range c.cfg.ExtraHeaders {
 		headers[k] = v

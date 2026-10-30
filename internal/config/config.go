@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 
 	"github.com/P-Baranwal/clerify/internal/ai"
+	"github.com/P-Baranwal/clerify/internal/atomicfile"
 	"github.com/P-Baranwal/clerify/internal/model"
 )
 
@@ -43,8 +44,16 @@ func Load(path string) (Config, error) {
 		}
 		return cfg, err
 	}
+	// Maps are merged by encoding/json when unmarshalling into a non-nil map.
+	// Clear them first so a config file can actually remove a provider field
+	// such as Sarvam's reasoning_effort.
+	cfg.AI.ExtraBody = nil
+	cfg.AI.ExtraHeaders = nil
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return Default(), fmt.Errorf("parse %s: %w", filepath.Base(path), err)
+	}
+	if cfg.AI.ExtraBody == nil && cfg.AI.Preset == "sarvam" {
+		cfg.AI.ExtraBody = map[string]any{"reasoning_effort": nil}
 	}
 	cfg.AI.Normalize()
 	if cfg.UI.Theme == "" {
@@ -69,29 +78,5 @@ func (c Config) Save(path string) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
-	f, err := os.CreateTemp(dir, filepath.Base(path)+".tmp.*")
-	if err != nil {
-		return err
-	}
-	tmp := f.Name()
-	defer func() { _ = os.Remove(tmp) }()
-
-	if _, err := f.Write(data); err != nil {
-		_ = f.Close()
-		return err
-	}
-	if err := f.Sync(); err != nil {
-		_ = f.Close()
-		return err
-	}
-	if err := f.Close(); err != nil {
-		return err
-	}
-	if err := os.Chmod(tmp, 0o600); err != nil {
-		return err
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		return err
-	}
-	return nil
+	return atomicfile.WriteFile(path, data, 0o600)
 }

@@ -19,7 +19,7 @@ const (
 func CalendarMonth(w io.Writer, year int, month time.Month, leading int, days []derive.CalendarDay) {
 	title := fmt.Sprintf("%s %d", month.String(), year)
 	fmt.Fprintln(w, title)
-	fmt.Fprintln(w, strings.Repeat("─", len(title)))
+	fmt.Fprintln(w, strings.Repeat("─", Width(title)))
 	fmt.Fprintln(w, weekdayHeader(calendarCellWidth))
 	fmt.Fprintln(w, strings.Repeat("─", 7*calendarCellWidth))
 
@@ -91,11 +91,7 @@ func dayCell(day derive.CalendarDay) []string {
 }
 
 func padRight(s string, width int) string {
-	n := len([]rune(s))
-	if n >= width {
-		return s
-	}
-	return s + strings.Repeat(" ", width-n)
+	return PadRight(s, width)
 }
 
 // PlanView renders the weekly plan.

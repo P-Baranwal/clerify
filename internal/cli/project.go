@@ -4,12 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"strings"
 
 	"github.com/spf13/cobra"
 
 	"github.com/P-Baranwal/clerify/internal/ai"
+	"github.com/P-Baranwal/clerify/internal/format"
 	"github.com/P-Baranwal/clerify/internal/model"
 	"github.com/P-Baranwal/clerify/internal/pdf"
 	"github.com/P-Baranwal/clerify/internal/render"
@@ -48,23 +48,36 @@ func (a *App) projectNewCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			if withWBS && strings.TrimSpace(body) == "" {
+				return fail(2, errors.New("--wbs needs a brief (--brief or --brief-file)"))
+			}
 
-			project, err := a.DB.AddProject(model.Project{Title: title, Brief: body})
+			var wbsItems []ai.WBSItem
+			if withWBS {
+				items, ok, err := a.generateWBS(body)
+				if err != nil {
+					return err
+				}
+				if !ok {
+					return nil // --dry-run printed the prompt
+				}
+				wbsItems = items
+			}
+
+			project, created, err := a.createProject(title, body, wbsItems)
 			if err != nil {
 				return err
 			}
-			a.journalProject(store.OpCreate, "Created project \""+project.Title+"\"", nil, &project)
 
 			if a.flags.JSON {
+				if withWBS {
+					return a.printJSON(map[string]any{"project": project, "items": created})
+				}
 				return a.printJSON(project)
 			}
 			a.printf("created project %s  %s\n", shortID(project.ID), project.Title)
-
 			if withWBS {
-				if strings.TrimSpace(body) == "" {
-					return fail(2, errors.New("--wbs needs a brief (--brief or --brief-file)"))
-				}
-				return a.applyWBS(project, body)
+				a.printf("created %d item(s) in %s\n", len(created), project.Title)
 			}
 			return nil
 		},
@@ -74,6 +87,54 @@ func (a *App) projectNewCmd() *cobra.Command {
 	cmd.Flags().StringVar(&briefFile, "brief-file", "", "read the brief from a file")
 	cmd.Flags().BoolVar(&withWBS, "wbs", false, "generate and create sub-tasks from the brief")
 	return cmd
+}
+
+func (a *App) createProject(title, brief string, wbs []ai.WBSItem) (model.Project, []model.Item, error) {
+	var (
+		project model.Project
+		created []model.Item
+	)
+	err := a.DB.Mutate(func(tx *store.Tx) error {
+		now := model.NowRFC3339(tx.Now())
+		project = model.NormalizeProject(model.Project{Title: title, Brief: brief, ID: model.NewID()})
+		project.CreatedAt = now
+		project.UpdatedAt = now
+		tx.Store().Projects = append(tx.Store().Projects, project)
+		tx.Journal(store.Entry{
+			TS:           now,
+			Op:           store.OpCreate,
+			Label:        "Created project \"" + project.Title + "\"",
+			ProjectAfter: &project,
+		})
+
+		for _, w := range wbs {
+			it := model.NewItem(w.Title)
+			it.EstimatedHours = w.EstimatedHours
+			impact := w.ImpactScore
+			it.ImpactScore = &impact
+			it.ProjectID = &project.ID
+			it.Description = render.Truncate(brief, 500)
+			it = model.NormalizeItem(it)
+			it.CreatedAt = now
+			it.UpdatedAt = now
+			tx.Store().Items = append(tx.Store().Items, it)
+			created = append(created, it.Clone())
+		}
+		if len(created) > 0 {
+			changes := make([]store.ItemChange, 0, len(created))
+			for i := range created {
+				changes = append(changes, store.ItemChange{After: &created[i]})
+			}
+			tx.Journal(store.Entry{
+				TS:    now,
+				Op:    store.OpCreate,
+				Label: fmt.Sprintf("Added %d WBS item(s)", len(created)),
+				Batch: changes,
+			})
+		}
+		return nil
+	})
+	return project, created, err
 }
 
 func (a *App) projectLsCmd() *cobra.Command {
@@ -106,7 +167,8 @@ func (a *App) projectLsCmd() *cobra.Command {
 }
 
 func (a *App) projectShowCmd() *cobra.Command {
-	return &cobra.Command{
+	var board bool
+	cmd := &cobra.Command{
 		Use:   "show <ref>",
 		Short: "Show a project and its items",
 		Args:  exactArgs(1),
@@ -125,23 +187,29 @@ func (a *App) projectShowCmd() *cobra.Command {
 				}
 			}
 			if a.flags.JSON {
-				return a.printJSON(map[string]any{"project": p, "items": items})
+				return a.printJSON(map[string]any{"project": p, "items": items, "board": board})
 			}
-			fmt.Fprintf(a.Out, "%s\n%s\n\n", p.Title, strings.Repeat("─", len(p.Title)))
+			fmt.Fprintf(a.Out, "%s\n%s\n\n", p.Title, strings.Repeat("─", render.Width(p.Title)))
 			fmt.Fprintf(a.Out, "%-16s %s\n", "id", p.ID)
 			fmt.Fprintf(a.Out, "%-16s %s\n", "status", p.Status)
-			fmt.Fprintf(a.Out, "%-16s %s\n", "created", p.CreatedAt)
+			fmt.Fprintf(a.Out, "%-16s %s\n", "created", render.FormatTimestamp(p.CreatedAt))
 			fmt.Fprintf(a.Out, "%-16s %d\n", "items", len(items))
 			if p.Brief != "" {
 				fmt.Fprintf(a.Out, "\nbrief\n  %s\n", render.Truncate(p.Brief, 400))
 			}
 			if len(items) > 0 {
 				fmt.Fprintln(a.Out)
-				render.ItemTable(a.Out, items, a.DB.ProjectTitle, a.now())
+				if board {
+					render.Board(a.Out, items)
+				} else {
+					render.ItemTable(a.Out, items, a.DB.ProjectTitle, a.now())
+				}
 			}
 			return nil
 		},
 	}
+	cmd.Flags().BoolVar(&board, "board", false, "group items into status columns")
+	return cmd
 }
 
 func (a *App) projectDoneCmd() *cobra.Command {
@@ -157,13 +225,30 @@ func (a *App) projectDoneCmd() *cobra.Command {
 			if err != nil {
 				return notFound("project", args[0], err)
 			}
-			before := p
-			p.Status = model.ProjectDone
-			saved, err := a.DB.UpdateProject(p)
+
+			var saved model.Project
+			err = a.DB.Mutate(func(tx *store.Tx) error {
+				cur, ok := tx.Project(p.ID)
+				if !ok {
+					return store.ErrNotFound
+				}
+				before := *cur
+				cur.Status = model.ProjectDone
+				*cur = model.NormalizeProject(*cur)
+				cur.UpdatedAt = model.NowRFC3339(tx.Now())
+				saved = *cur
+				tx.Journal(store.Entry{
+					TS:            model.NowRFC3339(tx.Now()),
+					Op:            store.OpUpdate,
+					Label:         "Completed project \"" + saved.Title + "\"",
+					ProjectBefore: &before,
+					ProjectAfter:  &saved,
+				})
+				return nil
+			})
 			if err != nil {
 				return err
 			}
-			a.journalProject(store.OpUpdate, "Completed project \""+saved.Title+"\"", &before, &saved)
 			if a.flags.JSON {
 				return a.printJSON(saved)
 			}
@@ -190,12 +275,42 @@ func (a *App) projectRmCmd() *cobra.Command {
 			if !a.confirm(fmt.Sprintf("Delete project %q? Its items will be kept.", p.Title)) {
 				return fail(1, errors.New("aborted (pass --yes to skip confirmation)"))
 			}
-			before := p
-			if _, err := a.DB.DeleteProject(p.ID); err != nil {
+
+			err = a.DB.Mutate(func(tx *store.Tx) error {
+				cur, ok := tx.Project(p.ID)
+				if !ok {
+					return store.ErrNotFound
+				}
+				before := *cur
+				var detached []model.Item
+				for i := range tx.Store().Items {
+					it := &tx.Store().Items[i]
+					if it.ProjectID != nil && *it.ProjectID == p.ID {
+						detached = append(detached, it.Clone())
+						it.ProjectID = nil
+					}
+				}
+				var defaultBefore *string
+				if tx.Store().Profile.DefaultProjectID != nil && *tx.Store().Profile.DefaultProjectID == p.ID {
+					value := *tx.Store().Profile.DefaultProjectID
+					defaultBefore = &value
+					tx.Store().Profile.DefaultProjectID = nil
+				}
+				removeProject(tx.Store(), p.ID)
+				tx.Journal(store.Entry{
+					TS:                     model.NowRFC3339(tx.Now()),
+					Op:                     store.OpDelete,
+					Label:                  "Deleted project \"" + before.Title + "\"",
+					ProjectBefore:          &before,
+					DefaultProjectIDBefore: defaultBefore,
+					ItemsBefore:            detached,
+				})
+				return nil
+			})
+			if err != nil {
 				return err
 			}
-			a.journalProject(store.OpDelete, "Deleted project \""+before.Title+"\"", &before, nil)
-			a.printf("deleted project %s  %s\n", shortID(before.ID), before.Title)
+			a.printf("deleted project %s  %s\n", shortID(p.ID), p.Title)
 			return nil
 		},
 	}
@@ -237,34 +352,46 @@ func (a *App) wbsCmd() *cobra.Command {
 				return fail(2, errors.New("no brief: pass --brief, --brief-file, or a project with a brief"))
 			}
 
+			items, ok, err := a.generateWBS(body)
+			if err != nil {
+				return err
+			}
+			if !ok {
+				return nil
+			}
+
 			if !apply {
-				items, ok, err := a.generateWBS(body)
-				if err != nil {
-					return err
-				}
-				if !ok {
-					return nil
+				if a.flags.JSON {
+					return a.printJSON(map[string]any{"brief": body, "items": items})
 				}
 				headers := []string{"TITLE", "EST", "IMPACT"}
 				rows := make([][]string, 0, len(items))
 				for _, it := range items {
-					rows = append(rows, []string{render.Truncate(it.Title, 56), hours(it.EstimatedHours), fmt.Sprintf("%d", it.ImpactScore)})
+					rows = append(rows, []string{render.Truncate(it.Title, 56), format.Hours(it.EstimatedHours), fmt.Sprintf("%d", it.ImpactScore)})
 				}
 				render.Table(a.Out, headers, rows)
 				a.printf("\nnot created; re-run with --apply\n")
 				return nil
 			}
 
+			var created []model.Item
 			if !haveProject {
-				created, err := a.DB.AddProject(model.Project{Title: deriveTitle(body), Brief: body})
-				if err != nil {
-					return err
-				}
-				project, haveProject = created, true
-				a.journalProject(store.OpCreate, "Created project \""+created.Title+"\"", nil, &created)
-				a.printf("created project %s  %s\n", shortID(created.ID), created.Title)
+				project, created, err = a.createProject(deriveTitle(body), body, items)
+			} else {
+				created, err = a.applyWBSItems(project, items)
 			}
-			return a.applyWBS(project, body)
+			if err != nil {
+				return err
+			}
+
+			if a.flags.JSON {
+				return a.printJSON(map[string]any{"project": project, "items": created})
+			}
+			if !haveProject {
+				a.printf("created project %s  %s\n", shortID(project.ID), project.Title)
+			}
+			a.printf("created %d item(s) in %s\n", len(created), project.Title)
+			return nil
 		},
 	}
 	cmd.Flags().StringVar(&brief, "brief", "", "brief text")
@@ -273,32 +400,37 @@ func (a *App) wbsCmd() *cobra.Command {
 	return cmd
 }
 
-func (a *App) applyWBS(project model.Project, brief string) error {
-	items, ok, err := a.generateWBS(brief)
-	if err != nil {
-		return err
-	}
-	if !ok {
-		return nil
-	}
-
-	created := 0
-	for _, w := range items {
-		it := model.NewItem(w.Title)
-		it.EstimatedHours = w.EstimatedHours
-		impact := w.ImpactScore
-		it.ImpactScore = &impact
-		it.ProjectID = &project.ID
-		it.Description = render.Truncate(brief, 500)
-		saved, err := a.DB.AddItem(it)
-		if err != nil {
-			return err
+func (a *App) applyWBSItems(project model.Project, items []ai.WBSItem) ([]model.Item, error) {
+	var created []model.Item
+	err := a.DB.Mutate(func(tx *store.Tx) error {
+		now := model.NowRFC3339(tx.Now())
+		for _, w := range items {
+			it := model.NewItem(w.Title)
+			it.EstimatedHours = w.EstimatedHours
+			impact := w.ImpactScore
+			it.ImpactScore = &impact
+			it.ProjectID = &project.ID
+			it = model.NormalizeItem(it)
+			it.CreatedAt = now
+			it.UpdatedAt = now
+			tx.Store().Items = append(tx.Store().Items, it)
+			created = append(created, it.Clone())
 		}
-		a.journalItem(store.OpCreate, "Added \""+saved.Title+"\"", nil, &saved)
-		created++
-	}
-	a.printf("created %d item(s) in %s\n", created, project.Title)
-	return nil
+		if len(created) > 0 {
+			changes := make([]store.ItemChange, 0, len(created))
+			for i := range created {
+				changes = append(changes, store.ItemChange{After: &created[i]})
+			}
+			tx.Journal(store.Entry{
+				TS:    now,
+				Op:    store.OpCreate,
+				Label: fmt.Sprintf("Added %d WBS item(s)", len(created)),
+				Batch: changes,
+			})
+		}
+		return nil
+	})
+	return created, err
 }
 
 // generateWBS calls the provider. ok is false when --dry-run printed the prompt.
@@ -323,14 +455,12 @@ func (a *App) generateWBS(brief string) ([]ai.WBSItem, bool, error) {
 	return items, true, nil
 }
 
-// briefText resolves a brief from inline text or a file.
+// briefText resolves a brief from inline text or a file. PDF extraction
+// failures are surfaced instead of falling back to raw bytes.
 func (a *App) briefText(inline, file string) (string, error) {
 	if strings.TrimSpace(file) != "" {
 		text, err := pdf.Extract(file)
 		if err != nil {
-			if data, rerr := os.ReadFile(file); rerr == nil {
-				return strings.TrimSpace(string(data)), nil
-			}
 			return "", fail(2, err)
 		}
 		return strings.TrimSpace(text), nil

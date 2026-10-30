@@ -17,6 +17,8 @@ var (
 	ErrNotFound = errors.New("not found")
 	// ErrLockTimeout is returned when another process holds the store lock.
 	ErrLockTimeout = errors.New("could not acquire the store lock; another clerify process may be running")
+	// ErrUnreadable is returned when store.json cannot be read or recovered.
+	ErrUnreadable = errors.New("store is unreadable")
 )
 
 // AmbiguousError is returned when an id prefix matches more than one record.
@@ -67,7 +69,8 @@ func ResolvePaths(explicit string) (Paths, error) {
 	}, nil
 }
 
-// DB is an open store. Mutating helpers persist immediately.
+// DB is an open store. Reads use Data; writes go through Mutate so they reload
+// the document under the lock and never overwrite a concurrent change.
 type DB struct {
 	Paths     Paths
 	Data      *model.Store
@@ -76,7 +79,46 @@ type DB struct {
 
 	// Now is injectable so tests can control timestamps.
 	Now func() time.Time
+
+	skipBackupOnce bool
 }
+
+// Tx is one locked read-modify-write transaction.
+type Tx struct {
+	db      *DB
+	store   *model.Store
+	entries []Entry
+	now     time.Time
+}
+
+// Store returns the live document inside the transaction.
+func (tx *Tx) Store() *model.Store { return tx.store }
+
+// Now returns the transaction clock.
+func (tx *Tx) Now() time.Time { return tx.now }
+
+// Item returns a live pointer to the item with the exact id.
+func (tx *Tx) Item(id string) (*model.Item, bool) {
+	for i := range tx.store.Items {
+		if tx.store.Items[i].ID == id {
+			return &tx.store.Items[i], true
+		}
+	}
+	return nil, false
+}
+
+// Project returns a live pointer to the project with the exact id.
+func (tx *Tx) Project(id string) (*model.Project, bool) {
+	for i := range tx.store.Projects {
+		if tx.store.Projects[i].ID == id {
+			return &tx.store.Projects[i], true
+		}
+	}
+	return nil, false
+}
+
+// Journal records a reversible entry in the same transaction as the write.
+func (tx *Tx) Journal(e Entry) { tx.entries = append(tx.entries, e) }
 
 // Open loads the store, creating it if absent. A corrupt store falls back to
 // the last known-good backup rather than silently starting empty.
@@ -86,70 +128,121 @@ func Open(p Paths) (*DB, error) {
 		return nil, fmt.Errorf("create data directory: %w", err)
 	}
 
-	s := model.Store{}
-	data, err := os.ReadFile(p.StoreFile)
-	switch {
-	case err == nil:
-		if jerr := json.Unmarshal(data, &s); jerr != nil {
-			backup, berr := os.ReadFile(p.BackupFile)
-			if berr != nil {
-				return nil, fmt.Errorf("store is corrupt (%v) and no backup is available", jerr)
-			}
-			if jerr2 := json.Unmarshal(backup, &s); jerr2 != nil {
-				return nil, fmt.Errorf("store and backup are both corrupt: %v / %v", jerr, jerr2)
-			}
-			db.Recovered = true
+	now := db.now()
+	s, recovered, warnings, err := loadStore(p, now)
+	if err != nil {
+		return nil, err
+	}
+	db.Warnings = append(db.Warnings, warnings...)
+
+	if recovered {
+		db.Recovered = true
+		if corrupt, ok := quarantineCorruptStore(p); ok {
+			db.Warnings = append(db.Warnings, "store.json was unreadable; recovered from store.json.bak (corrupt file saved as "+corrupt+")")
+		} else {
+			db.Warnings = append(db.Warnings, "store.json was unreadable; recovered from store.json.bak")
 		}
-	case os.IsNotExist(err):
-		s = newStore(time.Now())
-	default:
-		return nil, fmt.Errorf("read store: %w", err)
+		// Never let the first post-recovery save overwrite the known-good
+		// backup, even if the corrupt file was successfully quarantined.
+		db.skipBackupOnce = true
+		// Persist the recovered document immediately. Otherwise the next
+		// Mutate would see a missing store.json (we just quarantined it) and
+		// create an empty store, losing the recovered data.
+		if err := writeStoreFile(p, s); err != nil {
+			return nil, err
+		}
 	}
 
-	if s.SchemaVersion > model.SchemaVersion {
-		return nil, fmt.Errorf("store schema version %d is newer than this binary supports (%d)", s.SchemaVersion, model.SchemaVersion)
-	}
-	migrate(&s)
-	sanitize(&s)
-
-	if db.Recovered {
-		db.Warnings = append(db.Warnings, "store.json was unreadable; recovered from store.json.bak")
-	}
-	db.Data = &s
+	db.Data = s
 	return db, nil
 }
 
 // Close is a no-op placeholder kept so callers can defer it.
 func (db *DB) Close() error { return nil }
 
-// Save atomically rewrites store.json after copying the previous contents to
-// store.json.bak.
-func (db *DB) Save() error {
-	if db.Data == nil {
-		return errors.New("store is not open")
-	}
-	db.Data.SchemaVersion = model.SchemaVersion
-	sanitize(db.Data)
-
-	data, err := json.MarshalIndent(db.Data, "", "  ")
-	if err != nil {
-		return fmt.Errorf("encode store: %w", err)
-	}
-	data = append(data, '\n')
-
+// Mutate acquires the store lock, reloads the document from disk, applies fn,
+// writes the result, and appends the transaction's journal entries. Because
+// the reload and write share one lock, concurrent commands can no longer lose
+// each other's changes.
+func (db *DB) Mutate(fn func(*Tx) error) error {
 	release, err := acquireLock(db.Paths.LockFile, 5*time.Second)
 	if err != nil {
 		return err
 	}
 	defer release()
 
-	if err := backupCurrent(db.Paths.StoreFile, db.Paths.BackupFile); err != nil {
+	now := db.now()
+	s, recovered, warnings, err := loadStore(db.Paths, now)
+	if err != nil {
 		return err
 	}
-	if err := writeFileAtomic(db.Paths.StoreFile, data, 0o644); err != nil {
+	if recovered {
+		db.Recovered = true
+		if corrupt, ok := quarantineCorruptStore(db.Paths); ok {
+			warnings = append(warnings, "store.json was unreadable; recovered from store.json.bak (corrupt file saved as "+corrupt+")")
+		}
+		db.skipBackupOnce = true
+	}
+
+	tx := &Tx{db: db, store: s, now: now}
+	if err := fn(tx); err != nil {
+		return err
+	}
+
+	tx.store.SchemaVersion = model.SchemaVersion
+	sanitizeAt(tx.store, now)
+
+	if !db.skipBackupOnce {
+		if err := backupCurrent(db.Paths.StoreFile, db.Paths.BackupFile); err != nil {
+			return err
+		}
+	}
+	if err := writeStoreFile(db.Paths, tx.store); err != nil {
+		return err
+	}
+	if len(tx.entries) > 0 {
+		if err := appendEntriesLocked(db.Paths, tx.entries); err != nil {
+			return err
+		}
+	}
+
+	db.Data = tx.store
+	db.Warnings = append(db.Warnings, warnings...)
+	db.skipBackupOnce = false
+	return nil
+}
+
+func writeStoreFile(p Paths, s *model.Store) error {
+	data, err := json.MarshalIndent(s, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode store: %w", err)
+	}
+	data = append(data, '\n')
+	if err := writeFileAtomic(p.StoreFile, data, 0o644); err != nil {
 		return fmt.Errorf("write store: %w", err)
 	}
 	return nil
+}
+
+// MutateItem is the common single-item transaction. Callers that need a
+// journal entry should use Mutate directly so the snapshot and entry share the
+// same lock.
+func (db *DB) MutateItem(id string, fn func(*model.Item) error) (model.Item, error) {
+	var out model.Item
+	err := db.Mutate(func(tx *Tx) error {
+		it, ok := tx.Item(id)
+		if !ok {
+			return ErrNotFound
+		}
+		if err := fn(it); err != nil {
+			return err
+		}
+		*it = model.NormalizeItem(*it)
+		it.UpdatedAt = model.NowRFC3339(tx.now)
+		out = it.Clone()
+		return nil
+	})
+	return out, err
 }
 
 // ── Items ────────────────────────────────────────────────────────────────────
@@ -199,22 +292,30 @@ func (db *DB) FindItem(ref string) (model.Item, error) {
 
 // AddItem normalizes, stamps, appends and saves.
 func (db *DB) AddItem(it model.Item) (model.Item, error) {
-	it = model.NormalizeItem(it)
-	if it.ID == "" {
-		it.ID = model.NewID()
-	}
-	if _, exists := db.ItemByID(it.ID); exists {
-		return it, fmt.Errorf("item %s already exists", it.ID)
-	}
-	now := model.NowRFC3339(db.now())
-	if it.CreatedAt == "" {
-		it.CreatedAt = now
-	}
-	if it.UpdatedAt == "" {
-		it.UpdatedAt = now
-	}
-	db.Data.Items = append(db.Data.Items, it)
-	return it, db.Save()
+	var saved model.Item
+	err := db.Mutate(func(tx *Tx) error {
+		it = model.NormalizeItem(it)
+		if it.ID == "" {
+			it.ID = model.NewID()
+		}
+		if _, exists := tx.Item(it.ID); exists {
+			return fmt.Errorf("item %s already exists", it.ID)
+		}
+		now := model.NowRFC3339(tx.now)
+		if it.CreatedAt == "" {
+			it.CreatedAt = now
+		}
+		if it.UpdatedAt == "" {
+			it.UpdatedAt = now
+		}
+		if it.Status == model.StatusDone && it.CompletedAt == nil {
+			it.CompletedAt = &now
+		}
+		tx.store.Items = append(tx.store.Items, it)
+		saved = it.Clone()
+		return nil
+	})
+	return saved, err
 }
 
 // UpdateItem replaces an existing item and saves.
@@ -222,29 +323,38 @@ func (db *DB) UpdateItem(it model.Item) (model.Item, error) {
 	if strings.TrimSpace(it.ID) == "" {
 		return it, errors.New("item id is required")
 	}
-	idx := db.itemIndex(it.ID)
-	if idx < 0 {
-		return it, ErrNotFound
-	}
-	current := db.Data.Items[idx]
-	it = model.NormalizeItem(it)
-	if it.CreatedAt == "" {
-		it.CreatedAt = current.CreatedAt
-	}
-	it.UpdatedAt = model.NowRFC3339(db.now())
-	db.Data.Items[idx] = it
-	return it, db.Save()
+	var saved model.Item
+	err := db.Mutate(func(tx *Tx) error {
+		current, ok := tx.Item(it.ID)
+		if !ok {
+			return ErrNotFound
+		}
+		next := model.NormalizeItem(it)
+		if next.CreatedAt == "" {
+			next.CreatedAt = current.CreatedAt
+		}
+		next.UpdatedAt = model.NowRFC3339(tx.now)
+		*current = next
+		saved = current.Clone()
+		return nil
+	})
+	return saved, err
 }
 
 // DeleteItem removes an item and returns the removed record.
 func (db *DB) DeleteItem(id string) (model.Item, error) {
-	idx := db.itemIndex(id)
-	if idx < 0 {
-		return model.Item{}, ErrNotFound
-	}
-	removed := db.Data.Items[idx].Clone()
-	db.Data.Items = append(db.Data.Items[:idx], db.Data.Items[idx+1:]...)
-	return removed, db.Save()
+	var removed model.Item
+	err := db.Mutate(func(tx *Tx) error {
+		for i := range tx.store.Items {
+			if tx.store.Items[i].ID == id {
+				removed = tx.store.Items[i].Clone()
+				tx.store.Items = append(tx.store.Items[:i], tx.store.Items[i+1:]...)
+				return nil
+			}
+		}
+		return ErrNotFound
+	})
+	return removed, err
 }
 
 // RestoreItem writes a snapshot back exactly as stored, without touching
@@ -254,53 +364,70 @@ func (db *DB) RestoreItem(it model.Item) error {
 	if it.ID == "" {
 		return errors.New("item id is required")
 	}
-	if idx := db.itemIndex(it.ID); idx >= 0 {
-		db.Data.Items[idx] = it
-	} else {
-		db.Data.Items = append(db.Data.Items, it)
-	}
-	return db.Save()
+	return db.Mutate(func(tx *Tx) error {
+		if current, ok := tx.Item(it.ID); ok {
+			*current = it
+			return nil
+		}
+		tx.store.Items = append(tx.store.Items, it)
+		return nil
+	})
 }
 
 // ReplaceItems swaps the whole collection (used by import --replace).
 func (db *DB) ReplaceItems(items []model.Item) error {
-	out := make([]model.Item, 0, len(items))
-	for _, it := range items {
-		it = model.NormalizeItem(it)
-		if it.ID == "" {
-			it.ID = model.NewID()
+	return db.Mutate(func(tx *Tx) error {
+		out := make([]model.Item, 0, len(items))
+		for _, it := range items {
+			it = model.NormalizeItem(it)
+			if it.ID == "" {
+				it.ID = model.NewID()
+			}
+			out = append(out, it)
 		}
-		out = append(out, it)
-	}
-	db.Data.Items = out
-	return db.Save()
+		tx.store.Items = out
+		return nil
+	})
 }
 
-// UpsertItems merges by id (used by import --merge).
+// UpsertItems merges by id. It is kept for callers that do not need the newer
+// timestamp rule; import uses UpsertItemsIfNewer.
 func (db *DB) UpsertItems(items []model.Item) (added, replaced int, err error) {
-	for _, it := range items {
-		it = model.NormalizeItem(it)
-		if it.ID == "" {
-			it.ID = model.NewID()
-		}
-		if idx := db.itemIndex(it.ID); idx >= 0 {
-			db.Data.Items[idx] = it
-			replaced++
-			continue
-		}
-		db.Data.Items = append(db.Data.Items, it)
-		added++
-	}
-	return added, replaced, db.Save()
+	added, replaced, _, err = db.UpsertItemsIfNewer(items)
+	return added, replaced, err
 }
 
-func (db *DB) itemIndex(id string) int {
-	for i := range db.Data.Items {
-		if db.Data.Items[i].ID == id {
-			return i
+// UpsertItemsIfNewer merges by id and refuses to overwrite a locally newer
+// item, so importing an older backup cannot clobber recent edits.
+func (db *DB) UpsertItemsIfNewer(items []model.Item) (added, replaced, skipped int, err error) {
+	err = db.Mutate(func(tx *Tx) error {
+		for _, it := range items {
+			it = model.NormalizeItem(it)
+			if it.ID == "" {
+				it.ID = model.NewID()
+			}
+			idx := -1
+			for i := range tx.store.Items {
+				if tx.store.Items[i].ID == it.ID {
+					idx = i
+					break
+				}
+			}
+			if idx < 0 {
+				tx.store.Items = append(tx.store.Items, it)
+				added++
+				continue
+			}
+			if !incomingNewer(it.UpdatedAt, tx.store.Items[idx].UpdatedAt) {
+				skipped++
+				continue
+			}
+			tx.store.Items[idx] = it
+			replaced++
 		}
-	}
-	return -1
+		return nil
+	})
+	return added, replaced, skipped, err
 }
 
 // ── Projects ─────────────────────────────────────────────────────────────────
@@ -357,65 +484,74 @@ func (db *DB) FindProject(ref string) (model.Project, error) {
 
 // AddProject stamps and saves a new project.
 func (db *DB) AddProject(p model.Project) (model.Project, error) {
-	p = model.NormalizeProject(p)
-	if p.ID == "" {
-		p.ID = model.NewID()
-	}
-	if _, exists := db.ProjectByID(p.ID); exists {
-		return p, fmt.Errorf("project %s already exists", p.ID)
-	}
-	now := model.NowRFC3339(db.now())
-	if p.CreatedAt == "" {
-		p.CreatedAt = now
-	}
-	if p.UpdatedAt == "" {
-		p.UpdatedAt = now
-	}
-	db.Data.Projects = append(db.Data.Projects, p)
-	return p, db.Save()
+	var saved model.Project
+	err := db.Mutate(func(tx *Tx) error {
+		p = model.NormalizeProject(p)
+		if p.ID == "" {
+			p.ID = model.NewID()
+		}
+		if _, exists := tx.Project(p.ID); exists {
+			return fmt.Errorf("project %s already exists", p.ID)
+		}
+		now := model.NowRFC3339(tx.now)
+		if p.CreatedAt == "" {
+			p.CreatedAt = now
+		}
+		if p.UpdatedAt == "" {
+			p.UpdatedAt = now
+		}
+		tx.store.Projects = append(tx.store.Projects, p)
+		saved = p
+		return nil
+	})
+	return saved, err
 }
 
 // UpdateProject saves changes to an existing project.
 func (db *DB) UpdateProject(p model.Project) (model.Project, error) {
-	idx := -1
-	for i := range db.Data.Projects {
-		if db.Data.Projects[i].ID == p.ID {
-			idx = i
-			break
+	var saved model.Project
+	err := db.Mutate(func(tx *Tx) error {
+		current, ok := tx.Project(p.ID)
+		if !ok {
+			return ErrNotFound
 		}
-	}
-	if idx < 0 {
-		return p, ErrNotFound
-	}
-	p = model.NormalizeProject(p)
-	p.UpdatedAt = model.NowRFC3339(db.now())
-	db.Data.Projects[idx] = p
-	return p, db.Save()
+		next := model.NormalizeProject(p)
+		next.CreatedAt = current.CreatedAt
+		next.UpdatedAt = model.NowRFC3339(tx.now)
+		*current = next
+		saved = next
+		return nil
+	})
+	return saved, err
 }
 
 // DeleteProject removes a project and detaches its items (they become inbox items).
 func (db *DB) DeleteProject(id string) (model.Project, error) {
-	idx := -1
-	for i := range db.Data.Projects {
-		if db.Data.Projects[i].ID == id {
-			idx = i
-			break
+	var removed model.Project
+	err := db.Mutate(func(tx *Tx) error {
+		idx := -1
+		for i := range tx.store.Projects {
+			if tx.store.Projects[i].ID == id {
+				idx = i
+				break
+			}
 		}
-	}
-	if idx < 0 {
-		return model.Project{}, ErrNotFound
-	}
-	removed := db.Data.Projects[idx]
-	db.Data.Projects = append(db.Data.Projects[:idx], db.Data.Projects[idx+1:]...)
-	for i := range db.Data.Items {
-		if db.Data.Items[i].ProjectID != nil && *db.Data.Items[i].ProjectID == id {
-			db.Data.Items[i].ProjectID = nil
+		if idx < 0 {
+			return ErrNotFound
 		}
-	}
-	if db.Data.Profile.DefaultProjectID != nil && *db.Data.Profile.DefaultProjectID == id {
-		db.Data.Profile.DefaultProjectID = nil
-	}
-	return removed, db.Save()
+		removed = tx.store.Projects[idx]
+		tx.store.Projects = append(tx.store.Projects[:idx], tx.store.Projects[idx+1:]...)
+		for i := range tx.store.Items {
+			if tx.store.Items[i].ProjectID != nil && *tx.store.Items[i].ProjectID == id {
+				tx.store.Items[i].ProjectID = nil
+			}
+		}
+		if tx.store.Profile.DefaultProjectID != nil && *tx.store.Profile.DefaultProjectID == id {
+			tx.store.Profile.DefaultProjectID = nil
+		}
+		return nil
+	})
+	return removed, err
 }
 
 // RestoreProject writes a project snapshot back without touching timestamps.
@@ -424,28 +560,65 @@ func (db *DB) RestoreProject(p model.Project) error {
 	if p.ID == "" {
 		return errors.New("project id is required")
 	}
-	for i := range db.Data.Projects {
-		if db.Data.Projects[i].ID == p.ID {
-			db.Data.Projects[i] = p
-			return db.Save()
+	return db.Mutate(func(tx *Tx) error {
+		if current, ok := tx.Project(p.ID); ok {
+			*current = p
+			return nil
 		}
-	}
-	db.Data.Projects = append(db.Data.Projects, p)
-	return db.Save()
+		tx.store.Projects = append(tx.store.Projects, p)
+		return nil
+	})
 }
 
 // ReplaceProjects swaps the whole collection.
 func (db *DB) ReplaceProjects(projects []model.Project) error {
-	out := make([]model.Project, 0, len(projects))
-	for _, p := range projects {
-		p = model.NormalizeProject(p)
-		if p.ID == "" {
-			p.ID = model.NewID()
+	return db.Mutate(func(tx *Tx) error {
+		out := make([]model.Project, 0, len(projects))
+		for _, p := range projects {
+			p = model.NormalizeProject(p)
+			if p.ID == "" {
+				p.ID = model.NewID()
+			}
+			out = append(out, p)
 		}
-		out = append(out, p)
-	}
-	db.Data.Projects = out
-	return db.Save()
+		tx.store.Projects = out
+		return nil
+	})
+}
+
+// UpsertProjectsIfNewer merges projects by id using the same timestamp rule as
+// items.
+func (db *DB) UpsertProjectsIfNewer(projects []model.Project) (added, replaced, skipped int, err error) {
+	err = db.Mutate(func(tx *Tx) error {
+		for _, p := range projects {
+			p = model.NormalizeProject(p)
+			if p.ID == "" {
+				p.ID = model.NewID()
+			}
+			idx := -1
+			for i := range tx.store.Projects {
+				if tx.store.Projects[i].ID == p.ID {
+					idx = i
+					break
+				}
+			}
+			if idx < 0 {
+				tx.store.Projects = append(tx.store.Projects, p)
+				added++
+				continue
+			}
+			if !incomingNewer(p.UpdatedAt, tx.store.Projects[idx].UpdatedAt) {
+				skipped++
+				continue
+			}
+			p.CreatedAt = tx.store.Projects[idx].CreatedAt
+			p.UpdatedAt = model.NowRFC3339(tx.now)
+			tx.store.Projects[idx] = p
+			replaced++
+		}
+		return nil
+	})
+	return added, replaced, skipped, err
 }
 
 // ProjectTitle resolves a project id for display.
@@ -460,15 +633,20 @@ func (db *DB) ProjectTitle(id string) string {
 
 // SetProfile normalizes, stores and saves the profile.
 func (db *DB) SetProfile(p model.Profile) (model.Profile, error) {
-	p = model.NormalizeProfile(p)
-	db.Data.Profile = p
-	return p, db.Save()
+	saved := model.NormalizeProfile(p)
+	err := db.Mutate(func(tx *Tx) error {
+		tx.store.Profile = saved
+		return nil
+	})
+	return saved, err
 }
 
 // SetPlan caches the generated weekly plan.
 func (db *DB) SetPlan(p *model.Plan) error {
-	db.Data.Plan = p
-	return db.Save()
+	return db.Mutate(func(tx *Tx) error {
+		tx.store.Plan = p
+		return nil
+	})
 }
 
 func (db *DB) now() time.Time {
@@ -496,7 +674,49 @@ func newStore(now time.Time) model.Store {
 	}
 }
 
-func sanitize(s *model.Store) {
+func loadStore(p Paths, now time.Time) (*model.Store, bool, []string, error) {
+	s := model.Store{}
+	recovered := false
+
+	data, err := os.ReadFile(p.StoreFile)
+	switch {
+	case err == nil:
+		if jerr := json.Unmarshal(data, &s); jerr != nil {
+			backup, berr := os.ReadFile(p.BackupFile)
+			if berr != nil {
+				return nil, false, nil, fmt.Errorf("%w: store is corrupt (%v) and no backup is available", ErrUnreadable, jerr)
+			}
+			if jerr2 := json.Unmarshal(backup, &s); jerr2 != nil {
+				return nil, false, nil, fmt.Errorf("%w: store and backup are both corrupt: %v / %v", ErrUnreadable, jerr, jerr2)
+			}
+			recovered = true
+		}
+	case os.IsNotExist(err):
+		s = newStore(now)
+	default:
+		return nil, false, nil, fmt.Errorf("%w: read store: %v", ErrUnreadable, err)
+	}
+
+	if s.SchemaVersion > model.SchemaVersion {
+		return nil, false, nil, fmt.Errorf("store schema version %d is newer than this binary supports (%d)", s.SchemaVersion, model.SchemaVersion)
+	}
+	migrate(&s)
+	warnings := sanitizeAt(&s, now)
+	return &s, recovered, warnings, nil
+}
+
+func quarantineCorruptStore(p Paths) (string, bool) {
+	target := p.StoreFile + ".corrupt-" + time.Now().Format("20060102-150405")
+	if err := os.Rename(p.StoreFile, target); err != nil {
+		return "", false
+	}
+	return target, true
+}
+
+func sanitizeAt(s *model.Store, now time.Time) []string {
+	if now.IsZero() {
+		now = time.Now()
+	}
 	s.Profile = model.NormalizeProfile(s.Profile)
 	if s.Items == nil {
 		s.Items = []model.Item{}
@@ -504,17 +724,27 @@ func sanitize(s *model.Store) {
 	if s.Projects == nil {
 		s.Projects = []model.Project{}
 	}
-	now := model.NowRFC3339(time.Now())
+	ts := model.NowRFC3339(now)
+	var warnings []string
 	for i := range s.Items {
 		s.Items[i] = model.NormalizeItem(s.Items[i])
 		if s.Items[i].ID == "" {
 			s.Items[i].ID = model.NewID()
 		}
 		if s.Items[i].CreatedAt == "" {
-			s.Items[i].CreatedAt = now
+			s.Items[i].CreatedAt = ts
 		}
 		if s.Items[i].UpdatedAt == "" {
 			s.Items[i].UpdatedAt = s.Items[i].CreatedAt
+		}
+		if s.Items[i].Status == model.StatusDone && s.Items[i].CompletedAt == nil {
+			completed := s.Items[i].UpdatedAt
+			s.Items[i].CompletedAt = &completed
+		}
+		if s.Items[i].Deadline != nil {
+			if _, ok := model.ParseDeadline(*s.Items[i].Deadline); !ok {
+				warnings = append(warnings, fmt.Sprintf("item %s has invalid deadline %q", s.Items[i].ID, *s.Items[i].Deadline))
+			}
 		}
 	}
 	for i := range s.Projects {
@@ -523,16 +753,29 @@ func sanitize(s *model.Store) {
 			s.Projects[i].ID = model.NewID()
 		}
 		if s.Projects[i].CreatedAt == "" {
-			s.Projects[i].CreatedAt = now
+			s.Projects[i].CreatedAt = ts
 		}
 		if s.Projects[i].UpdatedAt == "" {
 			s.Projects[i].UpdatedAt = s.Projects[i].CreatedAt
 		}
 	}
 	if s.Meta.CreatedAt == "" {
-		s.Meta.CreatedAt = now
+		s.Meta.CreatedAt = ts
 	}
 	if s.Meta.DeviceID == "" {
 		s.Meta.DeviceID = model.NewID()
 	}
+	return warnings
+}
+
+func incomingNewer(incoming, local string) bool {
+	in, inErr := time.Parse(time.RFC3339, strings.TrimSpace(incoming))
+	lo, loErr := time.Parse(time.RFC3339, strings.TrimSpace(local))
+	if inErr != nil {
+		return false
+	}
+	if loErr != nil || local == "" {
+		return true
+	}
+	return in.After(lo)
 }

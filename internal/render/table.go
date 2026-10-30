@@ -4,38 +4,62 @@ import (
 	"fmt"
 	"io"
 	"strings"
-	"text/tabwriter"
 	"time"
 
+	"github.com/P-Baranwal/clerify/internal/format"
 	"github.com/P-Baranwal/clerify/internal/model"
 )
 
-// Table writes an aligned table with a dashed header rule.
+// Table writes an aligned table with a dashed header rule. Widths are
+// measured in terminal columns, not bytes, so non-ASCII titles stay aligned.
 func Table(w io.Writer, headers []string, rows [][]string) {
 	widths := make([]int, len(headers))
 	for i, h := range headers {
-		widths[i] = len(h)
+		widths[i] = Width(h)
 	}
 	for _, row := range rows {
 		for i := range headers {
-			if i < len(row) && len(row[i]) > widths[i] {
-				widths[i] = len(row[i])
+			if i < len(row) {
+				if n := Width(row[i]); n > widths[i] {
+					widths[i] = n
+				}
 			}
 		}
 	}
 
-	rule := make([]string, len(headers))
-	for i := range rule {
-		rule[i] = strings.Repeat("-", widths[i])
+	separator := "  "
+	ruleChar := "-"
+	switch current.TableStyle {
+	case "ascii":
+		separator = " | "
+	case "unicode":
+		separator = " │ "
+		ruleChar = "─"
 	}
 
-	tw := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(tw, strings.Join(headers, "\t"))
-	fmt.Fprintln(tw, strings.Join(rule, "\t"))
-	for _, row := range rows {
-		fmt.Fprintln(tw, strings.Join(row, "\t"))
+	writeRow := func(cells []string) {
+		for i := range headers {
+			if i > 0 {
+				fmt.Fprint(w, separator)
+			}
+			value := ""
+			if i < len(cells) {
+				value = cells[i]
+			}
+			fmt.Fprint(w, PadRight(value, widths[i]))
+		}
+		fmt.Fprintln(w)
 	}
-	_ = tw.Flush()
+
+	writeRow(headers)
+	rule := make([]string, len(headers))
+	for i := range rule {
+		rule[i] = strings.Repeat(ruleChar, widths[i])
+	}
+	writeRow(rule)
+	for _, row := range rows {
+		writeRow(row)
+	}
 }
 
 // ShortID renders the six-character id prefix used in listings.
@@ -59,12 +83,7 @@ func Truncate(s string, n int) string {
 }
 
 // Hours renders a duration without trailing zeros.
-func Hours(v float64) string {
-	s := fmt.Sprintf("%.2f", v)
-	s = strings.TrimRight(s, "0")
-	s = strings.TrimRight(s, ".")
-	return s + "h"
-}
+func Hours(v float64) string { return format.Hours(v) }
 
 // UrgencyCell renders the compact urgency column.
 func UrgencyCell(it model.Item, now time.Time) string {

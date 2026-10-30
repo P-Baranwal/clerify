@@ -1,6 +1,9 @@
 package model
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 // Item is the unified records type. It replaces both Assignment and Task from
 // the web app: optional fields are omitted from JSON when empty.
@@ -30,9 +33,10 @@ type Item struct {
 	ProjectID   *string `json:"projectId,omitempty"`
 	BlockerNote *string `json:"blockerNote,omitempty"`
 
-	CreatedAt  string  `json:"createdAt"`
-	UpdatedAt  string  `json:"updatedAt"`
-	AnalyzedAt *string `json:"analyzedAt,omitempty"`
+	CreatedAt   string  `json:"createdAt"`
+	UpdatedAt   string  `json:"updatedAt"`
+	CompletedAt *string `json:"completedAt,omitempty"`
+	AnalyzedAt  *string `json:"analyzedAt,omitempty"`
 }
 
 // Boost is a temporary AI re-score that overrides PriorityScore while active.
@@ -60,6 +64,18 @@ func (i Item) EffectiveScore() int {
 // IsDone reports whether the item is complete.
 func (i Item) IsDone() bool { return i.Status == StatusDone }
 
+// CompletionTime returns when the item was completed. It falls back to
+// UpdatedAt for stores written before CompletedAt existed.
+func (i Item) CompletionTime() time.Time {
+	if i.CompletedAt != nil {
+		if t, err := time.Parse(time.RFC3339, strings.TrimSpace(*i.CompletedAt)); err == nil {
+			return t
+		}
+	}
+	t, _ := time.Parse(time.RFC3339, strings.TrimSpace(i.UpdatedAt))
+	return t
+}
+
 // HasProject reports whether the item belongs to a project.
 func (i Item) HasProject() bool { return i.ProjectID != nil && *i.ProjectID != "" }
 
@@ -81,6 +97,10 @@ func (i Item) Clone() Item {
 	if i.BlockerNote != nil {
 		v := *i.BlockerNote
 		out.BlockerNote = &v
+	}
+	if i.CompletedAt != nil {
+		v := *i.CompletedAt
+		out.CompletedAt = &v
 	}
 	if i.AnalyzedAt != nil {
 		v := *i.AnalyzedAt

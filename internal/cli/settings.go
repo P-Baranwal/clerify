@@ -37,10 +37,11 @@ func (a *App) configShowCmd() *cobra.Command {
 			}
 			p := a.DB.Data.Profile
 			aiCfg := a.Cfg.AI
-			aiCfg.APIKey = maskKey(ai.ResolveKey(aiCfg, ""))
+			aiCfg.APIKey = maskKey(ai.ResolveKey(aiCfg, a.flags.APIKey))
 
 			if a.flags.JSON {
-				return a.printJSON(map[string]any{"profile": p, "ai": aiCfg})
+				aiCfg = redactAIConfig(aiCfg)
+				return a.printJSON(map[string]any{"profile": p, "ai": aiCfg, "ui": a.Cfg.UI})
 			}
 
 			fmt.Fprintln(a.Out, "profile")
@@ -50,6 +51,8 @@ func (a *App) configShowCmd() *cobra.Command {
 			fmt.Fprintf(a.Out, "  %-18s %d\n", "hoursPerDay", p.AvailableHoursPerDay)
 			fmt.Fprintf(a.Out, "  %-18s %s\n", "defaultProject", orDash(deref(p.DefaultProjectID)))
 			fmt.Fprintf(a.Out, "  %-18s %s\n", "theme", p.Theme)
+			fmt.Fprintf(a.Out, "  %-18s %s\n", "tableStyle", orDash(a.Cfg.UI.TableStyle))
+			fmt.Fprintf(a.Out, "  %-18s %s\n", "dateFormat", orDash(a.Cfg.UI.DateFormat))
 
 			fmt.Fprintln(a.Out, "\nai")
 			fmt.Fprintf(a.Out, "  %-18s %s\n", "preset", orDash(aiCfg.Preset))
@@ -76,6 +79,8 @@ func (a *App) configSetCmd() *cobra.Command {
 		hours          int
 		defaultProject string
 		theme          string
+		tableStyle     string
+		dateFormat     string
 	)
 	cmd := &cobra.Command{
 		Use:   "set",
@@ -90,16 +95,27 @@ func (a *App) configSetCmd() *cobra.Command {
 				p.Skills = skills
 			}
 			if cmd.Flags().Changed("preset") {
-				p.PriorityPreset = model.CanonicalPreset(preset)
+				st, err := model.ParsePreset(preset)
+				if err != nil {
+					return fail(2, err)
+				}
+				p.PriorityPreset = st
 			}
 			if cmd.Flags().Changed("rule") {
 				p.CustomPriorityRule = rule
 			}
 			if cmd.Flags().Changed("hours") {
+				if err := model.ValidateHours(hours); err != nil {
+					return fail(2, err)
+				}
 				p.AvailableHoursPerDay = hours
 			}
 			if cmd.Flags().Changed("theme") {
-				p.Theme = theme
+				th, err := model.ParseTheme(theme)
+				if err != nil {
+					return fail(2, err)
+				}
+				p.Theme = th
 			}
 			if cmd.Flags().Changed("default-project") {
 				id, err := a.resolveProject(defaultProject)
@@ -109,9 +125,34 @@ func (a *App) configSetCmd() *cobra.Command {
 				p.DefaultProjectID = id
 			}
 
+			uiChanged := false
+			if cmd.Flags().Changed("table-style") {
+				switch tableStyle {
+				case "plain", "ascii", "unicode":
+					a.Cfg.UI.TableStyle = tableStyle
+					uiChanged = true
+				default:
+					return fail(2, fmt.Errorf("unknown table style %q (use plain, ascii, or unicode)", tableStyle))
+				}
+			}
+			if cmd.Flags().Changed("date-format") {
+				switch dateFormat {
+				case model.DateLayout, "02/01/2006", "Jan 2, 2006":
+					a.Cfg.UI.DateFormat = dateFormat
+					uiChanged = true
+				default:
+					return fail(2, fmt.Errorf("unknown date format %q", dateFormat))
+				}
+			}
+
 			saved, err := a.DB.SetProfile(p)
 			if err != nil {
 				return err
+			}
+			if uiChanged {
+				if err := a.Cfg.Save(a.Paths.ConfigFile); err != nil {
+					return err
+				}
 			}
 			if a.flags.JSON {
 				return a.printJSON(saved)
@@ -127,6 +168,8 @@ func (a *App) configSetCmd() *cobra.Command {
 	fl.IntVar(&hours, "hours", 0, "available hours per day (1-16)")
 	fl.StringVar(&defaultProject, "default-project", "", "default project id or title")
 	fl.StringVar(&theme, "theme", "", "system|light|dark")
+	fl.StringVar(&tableStyle, "table-style", "", "plain|ascii|unicode")
+	fl.StringVar(&dateFormat, "date-format", "", "2006-01-02|02/01/2006|Jan 2, 2006")
 	return cmd
 }
 
@@ -180,12 +223,16 @@ func (a *App) aiPresetCmd() *cobra.Command {
 				return err
 			}
 			name := strings.ToLower(strings.TrimSpace(args[0]))
+			previous := a.Cfg.AI
 			cfg, ok := ai.ApplyPreset(name)
 			if !ok {
 				return fail(2, fmt.Errorf("unknown preset %q; known: %s", args[0], strings.Join(ai.PresetNames(), ", ")))
 			}
-			// Keep an existing key when switching presets.
-			cfg.APIKey = a.Cfg.AI.APIKey
+			// Keep an existing key only when re-applying the same provider. A
+			// key for one endpoint must never be sent to another.
+			if previous.Preset == name && !cfg.NoAuth {
+				cfg.APIKey = previous.APIKey
+			}
 			if cmd.Flags().Changed("base-url") {
 				cfg.BaseURL = baseURL
 			}
@@ -210,12 +257,14 @@ func (a *App) aiPresetCmd() *cobra.Command {
 				return err
 			}
 			if a.flags.JSON {
-				masked := cfg
+				masked := redactAIConfig(cfg)
 				masked.APIKey = maskKey(cfg.APIKey)
 				return a.printJSON(masked)
 			}
 			a.printf("provider set to %s (%s, model %s)\n", name, cfg.BaseURL, cfg.Model)
-			if ai.ResolveKey(cfg, "") == "" {
+			if cfg.NoAuth {
+				a.printf("this local preset ignores authentication\n")
+			} else if ai.ResolveKey(cfg, a.flags.APIKey) == "" {
 				a.printf("no key yet: run `clerify ai key --stdin` or set %s\n", strings.ToUpper(name)+"_API_KEY")
 			}
 			return nil
@@ -342,9 +391,9 @@ func (a *App) aiShowCmd() *cobra.Command {
 				return err
 			}
 			cfg := a.Cfg.AI
-			cfg.APIKey = maskKey(ai.ResolveKey(cfg, ""))
+			cfg.APIKey = maskKey(ai.ResolveKey(cfg, a.flags.APIKey))
 			if a.flags.JSON {
-				return a.printJSON(cfg)
+				return a.printJSON(redactAIConfig(cfg))
 			}
 			fmt.Fprintf(a.Out, "%-16s %s\n", "preset", orDash(cfg.Preset))
 			fmt.Fprintf(a.Out, "%-16s %s\n", "wire", cfg.Wire)
@@ -384,9 +433,13 @@ func (a *App) doctorCmd() *cobra.Command {
 			if a.DB.Recovered {
 				checks = append(checks, doctorCheck{Name: "backup", OK: true, Detail: "store was recovered from store.json.bak", Fatal: false})
 			}
-			key := ai.ResolveKey(a.Cfg.AI, a.flags.APIKey)
+			keyCheck := doctorCheck{Name: "api_key", OK: true, Detail: "not required for this local preset", Fatal: false}
+			if !a.Cfg.AI.NoAuth {
+				key := ai.ResolveKey(a.Cfg.AI, a.flags.APIKey)
+				keyCheck = doctorCheck{Name: "api_key", OK: key != "", Detail: keyDetail(key, a.aiClient().KeyEnvName()), Fatal: false}
+			}
 			checks = append(checks,
-				doctorCheck{Name: "api_key", OK: key != "", Detail: keyDetail(key, a.aiClient().KeyEnvName()), Fatal: false},
+				keyCheck,
 				doctorCheck{Name: "endpoint", OK: strings.TrimSpace(a.Cfg.AI.BaseURL) != "", Detail: orDash(a.Cfg.AI.BaseURL), Fatal: false},
 				a.checkPdftotext(),
 			)
@@ -454,7 +507,7 @@ func (a *App) tuiCmd() *cobra.Command {
 		Short: "Open the interactive interface",
 		Args:  cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return fail(2, fmt.Errorf("this binary was built without the TUI; rebuild with `go build -tags tui ./cmd/clerify`"))
+			return fail(2, fmt.Errorf("the interactive TUI is not implemented yet"))
 		},
 	}
 }
@@ -465,10 +518,29 @@ func maskKey(k string) string {
 	if k == "" {
 		return ""
 	}
-	if len(k) <= 8 {
-		return strings.Repeat("•", len(k))
+	runes := []rune(k)
+	if len(runes) <= 4 {
+		return strings.Repeat("•", len(runes))
 	}
-	return k[:4] + strings.Repeat("•", 6) + k[len(k)-4:]
+	hidden := len(runes) - 4
+	if hidden > 8 {
+		hidden = 8
+	}
+	return strings.Repeat("•", hidden) + string(runes[len(runes)-4:])
+}
+
+// redactAIConfig masks the key and every extra header value before the config
+// is printed as JSON, since extra headers can carry credentials.
+func redactAIConfig(cfg ai.Config) ai.Config {
+	cfg.APIKey = maskKey(cfg.APIKey)
+	if cfg.ExtraHeaders != nil {
+		redacted := make(map[string]string, len(cfg.ExtraHeaders))
+		for k, v := range cfg.ExtraHeaders {
+			redacted[k] = maskKey(v)
+		}
+		cfg.ExtraHeaders = redacted
+	}
+	return cfg
 }
 
 func keyDetail(key, envName string) string {

@@ -44,7 +44,7 @@ type ExtractedTask struct {
 // ParseAnalysis parses the JSON object an analysis call returns.
 func ParseAnalysis(raw string) (AnalysisResult, error) {
 	var obj map[string]any
-	if err := json.Unmarshal([]byte(jsonCandidate(raw, '{')), &obj); err != nil {
+	if err := decodeJSON(jsonCandidate(raw, '{'), &obj); err != nil {
 		return AnalysisResult{}, &ParseError{Message: "Failed to parse JSON from AI response."}
 	}
 
@@ -59,6 +59,17 @@ func ParseAnalysis(raw string) (AnalysisResult, error) {
 	}
 	if out.Title == "" {
 		out.Title = "Untitled"
+	}
+	if out.Deadline != nil {
+		due, err := model.ParseDeadlineStrict(*out.Deadline)
+		if err != nil {
+			return AnalysisResult{}, &ParseError{Message: "AI returned " + err.Error()}
+		}
+		if due == "" {
+			out.Deadline = nil
+		} else {
+			out.Deadline = &due
+		}
 	}
 
 	// parseInt(x) || 5 — a zero or unparseable value falls back, then clamps.
@@ -90,7 +101,7 @@ func ParseAnalysis(raw string) (AnalysisResult, error) {
 // ParseWeeklyPlan parses the JSON array a weekly-plan call returns.
 func ParseWeeklyPlan(raw string) ([]model.PlanDay, error) {
 	var arr []map[string]any
-	if err := json.Unmarshal([]byte(jsonCandidate(raw, '[')), &arr); err != nil {
+	if err := decodeJSON(jsonCandidate(raw, '['), &arr); err != nil {
 		return nil, &ParseError{Message: "Failed to parse weekly plan from AI response."}
 	}
 	if arr == nil {
@@ -138,7 +149,7 @@ func ParseWeeklyPlan(raw string) ([]model.PlanDay, error) {
 // ParseWBS parses the JSON array a work-breakdown call returns.
 func ParseWBS(raw string) ([]WBSItem, error) {
 	var arr []map[string]any
-	if err := json.Unmarshal([]byte(jsonCandidate(raw, '[')), &arr); err != nil || arr == nil {
+	if err := decodeJSON(jsonCandidate(raw, '['), &arr); err != nil || arr == nil {
 		return nil, &ParseError{Message: "Failed to parse WBS from AI response."}
 	}
 
@@ -169,7 +180,7 @@ func ParseWBS(raw string) ([]WBSItem, error) {
 // call returns.
 func ParseExtractedTask(raw string) (ExtractedTask, error) {
 	var obj map[string]any
-	if err := json.Unmarshal([]byte(jsonCandidate(raw, '{')), &obj); err != nil {
+	if err := decodeJSON(jsonCandidate(raw, '{'), &obj); err != nil {
 		return ExtractedTask{}, &ParseError{Message: "Failed to parse task from text."}
 	}
 	if isTrue(obj["error"]) {
@@ -190,6 +201,17 @@ func ParseExtractedTask(raw string) (ExtractedTask, error) {
 	if out.Title == "" {
 		out.Title = "Untitled Task"
 	}
+	if out.Deadline != nil {
+		due, err := model.ParseDeadlineStrict(*out.Deadline)
+		if err != nil {
+			return ExtractedTask{}, &ParseError{Message: "AI returned " + err.Error()}
+		}
+		if due == "" {
+			out.Deadline = nil
+		} else {
+			out.Deadline = &due
+		}
+	}
 	if v, ok := asFloatValue(obj["estimatedHours"]); ok {
 		out.EstimatedHours = &v
 	}
@@ -197,6 +219,14 @@ func ParseExtractedTask(raw string) (ExtractedTask, error) {
 }
 
 // ── helpers ──────────────────────────────────────────────────────────────────
+
+// decodeJSON uses UseNumber so the json.Number branches below are reachable
+// when a provider returns large integers or strings.
+func decodeJSON(raw string, v any) error {
+	dec := json.NewDecoder(strings.NewReader(raw))
+	dec.UseNumber()
+	return dec.Decode(v)
+}
 
 // jsonCandidate strips markdown fences and reduces the text to the JSON value
 // the caller expects. The oracle uses the same "first bracket to last bracket"

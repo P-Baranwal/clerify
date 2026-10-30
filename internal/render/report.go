@@ -18,8 +18,17 @@ type ReportData struct {
 	AvailableHoursPerDay int
 }
 
-// Report writes the requested sections. An empty list or "all" prints everything.
+// Report writes the requested sections with the default 8-week window.
 func Report(w io.Writer, d ReportData, sections []string) {
+	ReportWithWeeks(w, d, sections, 8)
+}
+
+// ReportWithWeeks writes the requested sections. An empty list or "all" prints
+// everything.
+func ReportWithWeeks(w io.Writer, d ReportData, sections []string, weeks int) {
+	if weeks <= 0 {
+		weeks = 8
+	}
 	include := func(name string) bool {
 		if len(sections) == 0 {
 			return true
@@ -39,7 +48,7 @@ func Report(w io.Writer, d ReportData, sections []string) {
 		}
 		first = false
 		fmt.Fprintln(w, title)
-		fmt.Fprintln(w, strings.Repeat("─", len(title)))
+		fmt.Fprintln(w, strings.Repeat("─", Width(title)))
 	}
 
 	if include("summary") {
@@ -66,9 +75,9 @@ func Report(w io.Writer, d ReportData, sections []string) {
 	}
 
 	if include("velocity") {
-		section("VELOCITY (last 8 weeks)")
-		rows := make([][]string, 0, 8)
-		for _, b := range derive.Velocity(d.Items, d.Now, 8) {
+		section(fmt.Sprintf("VELOCITY (last %d weeks)", weeks))
+		rows := make([][]string, 0, weeks)
+		for _, b := range derive.Velocity(d.Items, d.Now, weeks) {
 			rows = append(rows, []string{
 				b.Label,
 				fmt.Sprintf("%d", b.Count),
@@ -91,7 +100,7 @@ func Report(w io.Writer, d ReportData, sections []string) {
 			})
 		}
 		if len(rows) == 0 {
-			fmt.Fprintln(w, "No completed items with an estimate yet.")
+			fmt.Fprintln(w, "No completed items with both an estimate and recorded actual hours yet.")
 		} else {
 			Table(w, []string{"TYPE", "ESTIMATED", "ACTUAL", "VARIANCE", "ITEMS"}, rows)
 		}
@@ -111,9 +120,9 @@ func Report(w io.Writer, d ReportData, sections []string) {
 	}
 
 	if include("calibration") {
-		section("AI CALIBRATION (last 4 weeks)")
+		section(fmt.Sprintf("AI CALIBRATION (last %d weeks)", weeks))
 		rows := make([][]string, 0)
-		for _, r := range derive.Calibration(d.Items, 4) {
+		for _, r := range derive.Calibration(d.Items, weeks) {
 			rows = append(rows, []string{
 				r.Week,
 				fmt.Sprintf("%.0f", r.AvgPriority),

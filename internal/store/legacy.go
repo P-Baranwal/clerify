@@ -186,7 +186,19 @@ func ParseLegacy(data []byte) (*LegacyResult, error) {
 					fmt.Sprintf("duplicate id %s in the %s collection; reassigned to %s", original, kind, newID))
 			}
 			seen[newID] = true
-			res.Store.Items = append(res.Store.Items, model.NormalizeItem(li.toModel(newID)))
+			it := model.NormalizeItem(li.toModel(newID))
+			if it.Deadline != nil {
+				due, derr := model.ParseDeadlineStrict(*it.Deadline)
+				if derr != nil {
+					res.Warnings = append(res.Warnings, fmt.Sprintf("%s %s: %v", kind, newID, derr))
+					it.Deadline = nil
+				} else if due == "" {
+					it.Deadline = nil
+				} else {
+					it.Deadline = &due
+				}
+			}
+			res.Store.Items = append(res.Store.Items, it)
 		}
 	}
 

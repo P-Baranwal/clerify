@@ -2,7 +2,7 @@ name: ci
 
 on:
   push:
-    branches: [main]
+    branches: [master, main]
   pull_request:
 
 jobs:
@@ -24,6 +24,11 @@ jobs:
             exit 1
           fi
 
+      - name: go mod tidy
+        run: |
+          go mod tidy
+          git diff --exit-code go.mod go.sum
+
       - name: vet
         run: go vet ./...
 
@@ -32,6 +37,3 @@ jobs:
 
       - name: build
         run: CGO_ENABLED=0 go build -trimpath ./...
-
-      - name: build with tui tag
-        run: CGO_ENABLED=0 go build -tags tui -trimpath ./...

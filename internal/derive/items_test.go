@@ -168,10 +168,11 @@ func TestAccuracyVariance(t *testing.T) {
 	if len(rows) != 1 {
 		t.Fatalf("rows = %d", len(rows))
 	}
-	if rows[0].Estimated != 6 || rows[0].Actual != 8 {
+	// Items without a recorded actual are skipped, matching BuildInsights.
+	if rows[0].Estimated != 4 || rows[0].Actual != 6 {
 		t.Errorf("totals = %+v", rows[0])
 	}
-	if rows[0].VarianceText != "33.3" {
+	if rows[0].VarianceText != "50.0" {
 		t.Errorf("variance = %q", rows[0].VarianceText)
 	}
 }
@@ -250,4 +251,41 @@ func titles(items []model.Item) []string {
 		out[i] = it.Title
 	}
 	return out
+}
+
+func TestVelocityUsesCompletedAt(t *testing.T) {
+	now := time.Date(2026, 10, 26, 9, 0, 0, 0, time.Local) // Monday
+	completed := model.NowRFC3339(now.AddDate(0, 0, -7))
+	it := item("done last week", 1, withStatus(model.StatusDone), withUpdated(now))
+	it.CompletedAt = &completed
+
+	buckets := Velocity([]model.Item{it}, now, 8)
+	if buckets[7].Count != 0 {
+		t.Errorf("editing the item moved it into this week: %d", buckets[7].Count)
+	}
+	if buckets[6].Count != 1 {
+		t.Errorf("completion was not counted in its real week: %+v", buckets)
+	}
+}
+
+func TestStreakUsesCompletedAt(t *testing.T) {
+	now := time.Date(2026, 10, 26, 20, 0, 0, 0, time.Local)
+	completed := model.NowRFC3339(now)
+	it := item("done", 1, withStatus(model.StatusDone), withUpdated(now.AddDate(0, 0, -3)))
+	it.CompletedAt = &completed
+	if got := Streak([]model.Item{it}, now); got != 1 {
+		t.Errorf("streak = %d, want 1 (completed today, edited later)", got)
+	}
+}
+
+func TestRiskUsesFiveWorkdays(t *testing.T) {
+	now := time.Date(2026, 10, 26, 9, 0, 0, 0, time.Local)
+	items := []model.Item{item("a", 1, withHours(30), withDeadline("2026-10-28"))}
+	rep := Risk(items, now, 6)
+	if rep.AvailableHours != 30 {
+		t.Errorf("available = %v, want 6*5", rep.AvailableHours)
+	}
+	if rep.Overloaded {
+		t.Errorf("30h against a 30h work-week should not be overloaded: %+v", rep)
+	}
 }

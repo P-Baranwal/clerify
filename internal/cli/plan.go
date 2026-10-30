@@ -11,6 +11,7 @@ import (
 
 	"github.com/P-Baranwal/clerify/internal/ai"
 	"github.com/P-Baranwal/clerify/internal/derive"
+	"github.com/P-Baranwal/clerify/internal/format"
 	"github.com/P-Baranwal/clerify/internal/model"
 	"github.com/P-Baranwal/clerify/internal/render"
 )
@@ -34,6 +35,8 @@ type todayOutput struct {
 	Overdue  []model.Item      `json:"overdue"`
 	DueToday []model.Item      `json:"dueToday"`
 	Top      []model.Item      `json:"top"`
+	Inbox    []model.Item      `json:"inbox,omitempty"`
+	HighROI  []model.Item      `json:"highRoi,omitempty"`
 	Risk     derive.RiskReport `json:"risk"`
 	Blocks   []model.PlanBlock `json:"planBlocks,omitempty"`
 }
@@ -65,6 +68,12 @@ func (a *App) runToday() error {
 	}
 	out.Top = top
 
+	out.Inbox = derive.Inbox(items)
+	if len(out.Inbox) > 5 {
+		out.Inbox = out.Inbox[:5]
+	}
+	out.HighROI = derive.HighROI(items, 3)
+
 	out.Risk = derive.Risk(items, now, a.DB.Data.Profile.AvailableHoursPerDay)
 	out.Blocks = a.todayBlocks(now)
 
@@ -89,9 +98,20 @@ func (a *App) runToday() error {
 		render.ItemTable(a.Out, out.Top, a.DB.ProjectTitle, now)
 		fmt.Fprintln(a.Out)
 	}
+	if len(out.Inbox) > 0 {
+		allInbox := derive.Inbox(a.DB.Items())
+		fmt.Fprintf(a.Out, "INBOX (%d)\n", len(allInbox))
+		render.ItemTable(a.Out, out.Inbox, a.DB.ProjectTitle, now)
+		fmt.Fprintln(a.Out)
+	}
+	if len(out.HighROI) > 0 {
+		fmt.Fprintln(a.Out, "HIGH ROI")
+		render.ItemTable(a.Out, out.HighROI, a.DB.ProjectTitle, now)
+		fmt.Fprintln(a.Out)
+	}
 	if out.Risk.TaskCount > 0 {
 		fmt.Fprintf(a.Out, "CAPACITY   %s due in 7 days across %d items; %s available",
-			hours(out.Risk.TotalHours), out.Risk.TaskCount, hours(out.Risk.AvailableHours))
+			format.Hours(out.Risk.TotalHours), out.Risk.TaskCount, format.Hours(out.Risk.AvailableHours))
 		if out.Risk.Overloaded {
 			if out.Risk.Urgent {
 				fmt.Fprintf(a.Out, "  -- OVERLOADED (%.2fx), reschedule urgently", out.Risk.Ratio)
@@ -105,7 +125,7 @@ func (a *App) runToday() error {
 	if len(out.Blocks) > 0 {
 		fmt.Fprintln(a.Out, "TODAY'S PLAN")
 		for _, b := range out.Blocks {
-			fmt.Fprintf(a.Out, "  %-10s %s  (%s)\n", b.Slot, b.Task, hours(b.Hours))
+			fmt.Fprintf(a.Out, "  %-10s %s  (%s)\n", b.Slot, b.Task, format.Hours(b.Hours))
 		}
 	}
 	return nil
@@ -186,7 +206,9 @@ func (a *App) refreshPlan() error {
 	if err := a.DB.SetPlan(plan); err != nil {
 		return err
 	}
-	a.printf("plan generated (%d days)\n", len(parsed))
+	if !a.flags.JSON {
+		a.printf("plan generated (%d days)\n", len(parsed))
+	}
 	return nil
 }
 

@@ -1,6 +1,7 @@
 package ai
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -221,3 +222,41 @@ func TestBuildWeeklyPlanPrompt(t *testing.T) {
 }
 
 func contains(haystack, needle string) bool { return strings.Contains(haystack, needle) }
+
+func TestParseAnalysisValidatesDeadline(t *testing.T) {
+	bad := `{"title":"x","deadline":"tomorrow"}`
+	if _, err := ParseAnalysis(bad); err == nil {
+		t.Error("invalid deadline should fail analysis")
+	}
+	got, err := ParseAnalysis(`{"title":"x","deadline":"2026-11-2"}`)
+	if err == nil {
+		t.Errorf("non-canonical deadline should fail, got %+v", got)
+	}
+	got, err = ParseAnalysis(`{"title":"x","deadline":"2026-11-02"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Deadline == nil || *got.Deadline != "2026-11-02" {
+		t.Errorf("deadline = %v", got.Deadline)
+	}
+}
+
+func TestBuildWBSPromptJSONEncodesBrief(t *testing.T) {
+	_, user := BuildWBSPrompt(`build """this""" safely`, fixedNow())
+	if strings.Contains(user, `"""`) {
+		t.Errorf("brief can close the prompt block: %q", user)
+	}
+	if !strings.Contains(user, `build`) {
+		t.Errorf("brief content missing: %q", user)
+	}
+}
+
+func TestDecodeJSONUsesNumber(t *testing.T) {
+	var obj map[string]any
+	if err := decodeJSON(`{"n":12345678901234567890}`, &obj); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := obj["n"].(json.Number); !ok {
+		t.Errorf("expected json.Number, got %T", obj["n"])
+	}
+}

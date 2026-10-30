@@ -1,6 +1,7 @@
 package model
 
 import (
+	"fmt"
 	"math"
 	"strings"
 	"time"
@@ -24,6 +25,21 @@ func ParseDeadline(s string) (time.Time, bool) {
 		return time.Time{}, false
 	}
 	return t, true
+}
+
+// ParseDeadlineStrict validates and canonicalizes a user-supplied deadline.
+// Unlike ParseDeadline, it reports an error instead of returning false so flag
+// handlers can reject "tomorrow" or "2026-11-2" at the boundary.
+func ParseDeadlineStrict(s string) (string, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "", nil
+	}
+	t, err := time.ParseInLocation(DateLayout, s, time.Local)
+	if err != nil {
+		return "", fmt.Errorf("invalid deadline %q: expected YYYY-MM-DD", s)
+	}
+	return t.Format(DateLayout), nil
 }
 
 // FormatDeadline renders a time as YYYY-MM-DD in its own location.

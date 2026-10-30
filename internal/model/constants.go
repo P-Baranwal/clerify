@@ -1,11 +1,12 @@
 package model
 
 import (
+	"fmt"
 	"strings"
 )
 
 // SchemaVersion is the current on-disk store schema version.
-const SchemaVersion = 1
+const SchemaVersion = 2
 
 // Item types.
 const (
@@ -133,6 +134,78 @@ func CanonicalPreset(s string) string {
 	default:
 		return PresetBalanced
 	}
+}
+
+// ParseStatus is the strict counterpart to NormalizeStatus. It accepts the
+// documented aliases and rejects typos instead of silently falling back.
+func ParseStatus(s string) (string, error) {
+	raw := strings.ToLower(strings.TrimSpace(s))
+	switch raw {
+	case StatusTodo, "active", "":
+		return StatusTodo, nil
+	case StatusInProgress, "in-progress", "inprogress", "started":
+		return StatusInProgress, nil
+	case StatusBlocked, "block":
+		return StatusBlocked, nil
+	case StatusDone, "complete", "completed":
+		return StatusDone, nil
+	default:
+		return "", fmt.Errorf("unknown status %q (use todo, in_progress, blocked, or done)", s)
+	}
+}
+
+// ParseType is the strict counterpart to NormalizeType.
+func ParseType(s string) (string, error) {
+	raw := strings.TrimSpace(s)
+	if raw == "" {
+		return TypeOther, nil
+	}
+	for _, v := range Types {
+		if strings.EqualFold(v, raw) {
+			return v, nil
+		}
+	}
+	return "", fmt.Errorf("unknown type %q (use Essay, Coding, Math, Research, or Other)", s)
+}
+
+// ParsePreset is the strict counterpart to CanonicalPreset.
+func ParsePreset(s string) (string, error) {
+	raw := strings.ToLower(strings.TrimSpace(s))
+	key := strings.NewReplacer(" ", "-", "_", "-").Replace(raw)
+	switch key {
+	case "deadline-first", "deadline", "panic", "panic-mode":
+		return PresetDeadlineFirst, nil
+	case "difficulty-first", "difficulty", "hard-first", "frog", "frog-eating":
+		return PresetDifficultyFirst, nil
+	case "easiest-first", "easiest", "easy-first", "momentum":
+		return PresetEasiestFirst, nil
+	case "balanced", "":
+		return PresetBalanced, nil
+	default:
+		return "", fmt.Errorf("unknown priority preset %q (use Deadline-first, Difficulty-first, Easiest-first, or Balanced)", s)
+	}
+}
+
+// ParseTheme is the strict counterpart to NormalizeProfile's theme handling.
+func ParseTheme(s string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case ThemeSystem, "":
+		return ThemeSystem, nil
+	case ThemeLight:
+		return ThemeLight, nil
+	case ThemeDark:
+		return ThemeDark, nil
+	default:
+		return "", fmt.Errorf("unknown theme %q (use system, light, or dark)", s)
+	}
+}
+
+// ValidateHours checks the documented available-hours range.
+func ValidateHours(v int) error {
+	if v < MinAvailable || v > MaxAvailable {
+		return fmt.Errorf("hours must be between %d and %d, got %d", MinAvailable, MaxAvailable, v)
+	}
+	return nil
 }
 
 // IsValidProjectStatus reports whether s is an accepted project status.

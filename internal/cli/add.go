@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -10,6 +11,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/P-Baranwal/clerify/internal/ai"
+	"github.com/P-Baranwal/clerify/internal/format"
 	"github.com/P-Baranwal/clerify/internal/model"
 	"github.com/P-Baranwal/clerify/internal/pdf"
 	"github.com/P-Baranwal/clerify/internal/store"
@@ -57,7 +59,7 @@ checklist from the text, a file, or stdin.`,
 	fl.IntVar(&f.impact, "impact", 0, "impact score 1-10 (enables ROI priority)")
 	fl.Float64Var(&f.est, "est", 0, "estimated hours")
 	fl.Float64Var(&f.actual, "actual", 0, "actual hours spent")
-	fl.StringSliceVar(&f.checks, "check", nil, "checklist item (repeatable)")
+	fl.StringArrayVar(&f.checks, "check", nil, "checklist item (repeatable; commas are literal)")
 	fl.StringVar(&f.note, "note", "", "short note")
 	fl.StringVar(&f.desc, "desc", "", "description")
 	fl.StringVar(&f.file, "file", "", "read text from a file (PDF or plain text)")
@@ -68,7 +70,7 @@ checklist from the text, a file, or stdin.`,
 }
 
 func (a *App) runAdd(cmd *cobra.Command, f addFlags, args []string) error {
-	raw, err := a.gatherInput(f.file, f.stdin, args)
+	raw, err := a.gatherInputAllowTitle(f.file, f.stdin, f.title, args)
 	if err != nil {
 		return err
 	}
@@ -76,7 +78,11 @@ func (a *App) runAdd(cmd *cobra.Command, f addFlags, args []string) error {
 	useAI := f.analyze && !f.noAI
 	var result ai.AnalysisResult
 	if useAI {
-		res, ok, err := a.analyzeText(raw, nil, "")
+		input := raw
+		if strings.TrimSpace(input) == "" {
+			input = f.title
+		}
+		res, ok, err := a.analyzeText(input, nil, "")
 		if err != nil {
 			return err
 		}
@@ -88,7 +94,7 @@ func (a *App) runAdd(cmd *cobra.Command, f addFlags, args []string) error {
 
 	it := model.NewItem(f.title)
 	if useAI {
-		applyAnalysis(&it, result)
+		applyAnalysisNew(&it, result)
 		it.AnalyzedAt = strPtr(model.NowRFC3339(a.now()))
 		if strings.TrimSpace(f.title) != "" {
 			it.Title = strings.TrimSpace(f.title)
@@ -98,10 +104,17 @@ func (a *App) runAdd(cmd *cobra.Command, f addFlags, args []string) error {
 	}
 
 	if f.typ != "" {
-		it.Type = model.NormalizeType(f.typ)
+		typ, err := model.ParseType(f.typ)
+		if err != nil {
+			return fail(2, err)
+		}
+		it.Type = typ
 	}
 	if f.due != "" {
-		due := strings.TrimSpace(f.due)
+		due, err := model.ParseDeadlineStrict(f.due)
+		if err != nil {
+			return fail(2, err)
+		}
 		it.Deadline = &due
 	}
 	if cmd.Flags().Changed("est") {
@@ -142,16 +155,38 @@ func (a *App) runAdd(cmd *cobra.Command, f addFlags, args []string) error {
 		return a.printJSON(it)
 	}
 
-	saved, err := a.DB.AddItem(it)
+	var saved model.Item
+	err = a.DB.Mutate(func(tx *store.Tx) error {
+		now := model.NowRFC3339(tx.Now())
+		it = model.NormalizeItem(it)
+		if it.ID == "" {
+			it.ID = model.NewID()
+		}
+		if it.CreatedAt == "" {
+			it.CreatedAt = now
+		}
+		it.UpdatedAt = now
+		if it.Status == model.StatusDone && it.CompletedAt == nil {
+			it.CompletedAt = &now
+		}
+		tx.Store().Items = append(tx.Store().Items, it)
+		saved = it.Clone()
+		tx.Journal(store.Entry{
+			TS:    now,
+			Op:    store.OpCreate,
+			Label: "Added \"" + saved.Title + "\"",
+			After: &saved,
+		})
+		return nil
+	})
 	if err != nil {
 		return err
 	}
-	a.journalItem(store.OpCreate, "Added \""+saved.Title+"\"", nil, &saved)
 
 	if a.flags.JSON {
 		return a.printJSON(saved)
 	}
-	a.printf("added %s  %s  (priority %d, est %s)\n", shortID(saved.ID), saved.Title, saved.EffectiveScore(), hours(saved.EstimatedHours))
+	a.printf("added %s  %s  (priority %d, est %s)\n", shortID(saved.ID), saved.Title, saved.EffectiveScore(), format.Hours(saved.EstimatedHours))
 	return nil
 }
 
@@ -214,53 +249,86 @@ func (a *App) runAnalyze(args []string, file string, stdin, redo bool) error {
 	}
 
 	it := model.NewItem(res.Title)
-	applyAnalysis(&it, res)
+	applyAnalysisNew(&it, res)
 	it.RawContent = raw
 	it.Checklist = model.ReconcileChecklist(nil, res.Checklist)
 
 	if a.flags.DryRun {
 		return a.printJSON(it)
 	}
-	saved, err := a.DB.AddItem(it)
+	var saved model.Item
+	err = a.DB.Mutate(func(tx *store.Tx) error {
+		now := model.NowRFC3339(tx.Now())
+		it = model.NormalizeItem(it)
+		if it.ID == "" {
+			it.ID = model.NewID()
+		}
+		if it.CreatedAt == "" {
+			it.CreatedAt = now
+		}
+		it.UpdatedAt = now
+		if it.Status == model.StatusDone && it.CompletedAt == nil {
+			it.CompletedAt = &now
+		}
+		tx.Store().Items = append(tx.Store().Items, it)
+		saved = it.Clone()
+		tx.Journal(store.Entry{
+			TS:    now,
+			Op:    store.OpCreate,
+			Label: "Added \"" + saved.Title + "\"",
+			After: &saved,
+		})
+		return nil
+	})
 	if err != nil {
 		return err
 	}
-	a.journalItem(store.OpCreate, "Added \""+saved.Title+"\"", nil, &saved)
 	if a.flags.JSON {
 		return a.printJSON(saved)
 	}
 	a.printf("added %s  %s  (priority %d, est %s, difficulty %d)\n",
-		shortID(saved.ID), saved.Title, saved.EffectiveScore(), hours(saved.EstimatedHours), saved.Difficulty)
+		shortID(saved.ID), saved.Title, saved.EffectiveScore(), format.Hours(saved.EstimatedHours), saved.Difficulty)
 	return nil
 }
 
 func (a *App) applyAnalysisToItem(it model.Item, res ai.AnalysisResult, redo bool) error {
-	before := it.Clone()
-	applyAnalysis(&it, res)
-	it.AnalyzedAt = strPtr(model.NowRFC3339(a.now()))
+	var saved model.Item
+	err := a.DB.Mutate(func(tx *store.Tx) error {
+		cur, ok := tx.Item(it.ID)
+		if !ok {
+			return store.ErrNotFound
+		}
+		before := cur.Clone()
 
-	if redo {
-		lines := make([]string, 0, len(res.Checklist))
-		lines = append(lines, res.Checklist...)
-		it.Checklist = model.ReconcileChecklist(it.Checklist, lines)
-	} else {
-		it.Checklist = model.ReconcileChecklist(it.Checklist, res.Checklist)
-	}
-
-	if a.flags.DryRun {
-		return a.printJSON(it)
-	}
-	saved, err := a.DB.UpdateItem(it)
+		// Plain analyze fills unset fields; --re deliberately leaves user-edited
+		// title/type/deadline/estimate alone and only refreshes AI-owned fields.
+		applyAnalysisRefresh(cur, res, !redo)
+		cur.AnalyzedAt = strPtr(model.NowRFC3339(tx.Now()))
+		cur.Checklist = model.ReconcileChecklist(cur.Checklist, res.Checklist)
+		*cur = model.NormalizeItem(*cur)
+		cur.UpdatedAt = model.NowRFC3339(tx.Now())
+		saved = cur.Clone()
+		tx.Journal(store.Entry{
+			TS:     model.NowRFC3339(tx.Now()),
+			Op:     store.OpUpdate,
+			Label:  "Analyzed \"" + saved.Title + "\"",
+			Before: &before,
+			After:  &saved,
+		})
+		return nil
+	})
 	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return notFound("item", it.ID, err)
+		}
 		return err
 	}
-	a.journalItem(store.OpUpdate, "Analyzed \""+saved.Title+"\"", &before, &saved)
 
 	if a.flags.JSON {
 		return a.printJSON(saved)
 	}
 	a.printf("analyzed %s  %s  (priority %d, est %s, difficulty %d)\n",
-		shortID(saved.ID), saved.Title, saved.EffectiveScore(), hours(saved.EstimatedHours), saved.Difficulty)
+		shortID(saved.ID), saved.Title, saved.EffectiveScore(), format.Hours(saved.EstimatedHours), saved.Difficulty)
 	return nil
 }
 
@@ -268,6 +336,13 @@ func (a *App) applyAnalysisToItem(it model.Item, res ai.AnalysisResult, redo boo
 // --dry-run printed the prompt instead of calling the provider.
 func (a *App) analyzeText(raw string, existing *model.Item, boostReason string) (ai.AnalysisResult, bool, error) {
 	raw = a.truncate(raw)
+	if existing != nil {
+		trimmed := existing.Clone()
+		trimmed.RawContent = a.truncate(trimmed.RawContent)
+		trimmed.Description = a.truncate(trimmed.Description)
+		trimmed.Notes = a.truncate(trimmed.Notes)
+		existing = &trimmed
+	}
 	in := ai.AnalyzeInput{
 		RawContent:      raw,
 		Profile:         a.DB.Data.Profile,
@@ -314,7 +389,8 @@ func (a *App) truncate(s string) string {
 	return string(runes[:limit])
 }
 
-func applyAnalysis(it *model.Item, r ai.AnalysisResult) {
+// applyAnalysisNew fills a brand-new item from an AI result.
+func applyAnalysisNew(it *model.Item, r ai.AnalysisResult) {
 	if r.Title != "" {
 		it.Title = r.Title
 	}
@@ -322,12 +398,47 @@ func applyAnalysis(it *model.Item, r ai.AnalysisResult) {
 	if r.Deadline != nil {
 		it.Deadline = r.Deadline
 	}
+	it.EstimatedHours = r.EstimatedHours
+	applyAnalysisScores(it, r)
+}
+
+// applyAnalysisRefresh updates AI-owned fields on an existing item. When
+// fillUnset is true it may also fill empty title/type/deadline/estimate; when
+// false it never touches those fields, so manual edits survive re-analysis.
+func applyAnalysisRefresh(it *model.Item, r ai.AnalysisResult, fillUnset bool) {
+	if fillUnset {
+		if strings.TrimSpace(it.Title) == "" || it.Title == "Untitled" {
+			if r.Title != "" {
+				it.Title = r.Title
+			}
+		}
+		if strings.TrimSpace(it.Type) == "" || it.Type == model.TypeOther {
+			it.Type = model.NormalizeType(r.Type)
+		}
+		if it.Deadline == nil && r.Deadline != nil {
+			it.Deadline = r.Deadline
+		}
+		if it.EstimatedHours == 0 {
+			it.EstimatedHours = r.EstimatedHours
+		}
+	}
+	applyAnalysisScores(it, r)
+}
+
+func applyAnalysisScores(it *model.Item, r ai.AnalysisResult) {
 	it.Difficulty = r.Difficulty
 	it.DifficultyReasoning = r.DifficultyReasoning
-	it.EstimatedHours = r.EstimatedHours
 	it.EstimatedHoursReasoning = r.EstimatedHoursReasoning
 	it.PriorityScore = r.PriorityScore
 	it.PriorityReasoning = r.PriorityReasoning
+}
+
+// gatherInputAllowTitle permits `add --title X` with no body.
+func (a *App) gatherInputAllowTitle(file string, stdin bool, title string, args []string) (string, error) {
+	if file == "" && !stdin && len(args) == 0 && strings.TrimSpace(title) != "" {
+		return "", nil
+	}
+	return a.gatherInput(file, stdin, args)
 }
 
 // gatherInput resolves the text to work on from a file, stdin, or arguments.
@@ -372,11 +483,4 @@ func shortID(id string) string {
 		return id
 	}
 	return id[:6]
-}
-
-func hours(v float64) string {
-	s := fmt.Sprintf("%.2f", v)
-	s = strings.TrimRight(s, "0")
-	s = strings.TrimRight(s, ".")
-	return s + "h"
 }

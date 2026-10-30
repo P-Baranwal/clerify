@@ -38,13 +38,17 @@ func ItemTable(w io.Writer, items []model.Item, namer ProjectNamer, now time.Tim
 		if it.Deadline != nil && *it.Deadline != "" {
 			due = *it.Deadline
 		}
+		score := ScoreCell(it)
+		if strings.Contains(score, "*") {
+			score = colorize(score, "36")
+		}
 		rows = append(rows, []string{
 			ShortID(it.ID),
 			Truncate(it.Title, 44),
 			due,
-			UrgencyCell(it, now),
-			StatusCell(it),
-			ScoreCell(it),
+			colorUrgency(UrgencyCell(it, now)),
+			colorStatus(StatusCell(it)),
+			score,
 			Hours(it.EstimatedHours),
 			impact,
 			Truncate(project, 18),
@@ -67,7 +71,7 @@ func ItemDetail(w io.Writer, it model.Item, namer ProjectNamer, now time.Time) {
 	}
 
 	fmt.Fprintf(w, "%s\n", it.Title)
-	fmt.Fprintf(w, "%s\n\n", strings.Repeat("─", len([]rune(it.Title))))
+	fmt.Fprintf(w, "%s\n\n", strings.Repeat("─", Width(it.Title)))
 
 	field("id", it.ID)
 	field("type", it.Type)
@@ -126,10 +130,10 @@ func ItemDetail(w io.Writer, it model.Item, namer ProjectNamer, now time.Time) {
 	if it.PriorityReasoning != "" {
 		fmt.Fprintf(w, "\nwhy\n  %s\n", it.PriorityReasoning)
 	}
-	field("created", it.CreatedAt)
-	field("updated", it.UpdatedAt)
+	field("created", FormatTimestamp(it.CreatedAt))
+	field("updated", FormatTimestamp(it.UpdatedAt))
 	if it.AnalyzedAt != nil {
-		field("analyzed", *it.AnalyzedAt)
+		field("analyzed", FormatTimestamp(*it.AnalyzedAt))
 	}
 }
 
@@ -143,7 +147,7 @@ func ProjectTable(w io.Writer, projects []model.Project, counts map[string]int) 
 			Truncate(p.Title, 44),
 			p.Status,
 			fmt.Sprintf("%d", counts[p.ID]),
-			p.CreatedAt,
+			FormatTimestamp(p.CreatedAt),
 		})
 	}
 	Table(w, headers, rows)

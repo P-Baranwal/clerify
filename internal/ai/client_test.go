@@ -210,3 +210,50 @@ func TestApplyPresetsCoverBothWires(t *testing.T) {
 		t.Errorf("unknown preset should not resolve")
 	}
 }
+
+func TestNoAuthSkipsKeyAndHeader(t *testing.T) {
+	var auth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		auth = r.Header.Get("Authorization")
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"ok"}}]}`))
+	}))
+	defer srv.Close()
+
+	cfg := Config{
+		Preset: "ollama", BaseURL: srv.URL, Model: "local", NoAuth: true,
+		Temperature: 0.2, MaxTokens: 10, TimeoutSeconds: 5,
+	}
+	if _, err := New(cfg).Analyze(context.Background(), "s", "u", "f"); err != nil {
+		t.Fatal(err)
+	}
+	if auth != "" {
+		t.Errorf("local preset sent an auth header: %q", auth)
+	}
+}
+
+func TestApplyPresetsDoNotInheritSarvamExtraBody(t *testing.T) {
+	sarvam, ok := ApplyPreset("sarvam")
+	if !ok {
+		t.Fatal("sarvam preset missing")
+	}
+	if _, exists := sarvam.ExtraBody["reasoning_effort"]; !exists {
+		t.Error("sarvam should keep reasoning_effort")
+	}
+	for _, name := range []string{"anthropic", "openai", "gemini", "ollama"} {
+		cfg, ok := ApplyPreset(name)
+		if !ok {
+			t.Fatalf("%s preset missing", name)
+		}
+		if cfg.ExtraBody != nil {
+			t.Errorf("%s inherited extra_body: %#v", name, cfg.ExtraBody)
+		}
+	}
+}
+
+func TestConfigNormalizeNoAuth(t *testing.T) {
+	cfg := Config{NoAuth: true}
+	cfg.Normalize()
+	if cfg.AuthHeader != "" || cfg.AuthPrefix != "" {
+		t.Errorf("NoAuth config gained auth defaults: %+v", cfg)
+	}
+}

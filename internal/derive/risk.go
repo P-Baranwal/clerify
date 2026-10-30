@@ -16,12 +16,14 @@ type RiskReport struct {
 }
 
 // Risk sums estimated effort for non-done items due in the next seven days and
-// compares it with the user's weekly capacity.
+// compares it with the user's workday capacity. The plan prompt schedules
+// Monday–Friday, so capacity is five working days rather than seven calendar
+// days.
 func Risk(items []model.Item, now time.Time, availableHoursPerDay int) RiskReport {
 	if availableHoursPerDay <= 0 {
 		availableHoursPerDay = model.DefaultAvailableHours
 	}
-	rep := RiskReport{AvailableHours: float64(availableHoursPerDay) * 7}
+	rep := RiskReport{AvailableHours: float64(availableHoursPerDay) * 5}
 
 	for _, it := range items {
 		if it.IsDone() || it.Deadline == nil {

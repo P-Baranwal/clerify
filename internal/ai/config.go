@@ -20,6 +20,7 @@ type Config struct {
 	BaseURL            string            `json:"base_url,omitempty"`
 	Model              string            `json:"model,omitempty"`
 	APIKey             string            `json:"api_key,omitempty"`
+	NoAuth             bool              `json:"no_auth,omitempty"`
 	AuthHeader         string            `json:"auth_header,omitempty"`
 	AuthPrefix         string            `json:"auth_prefix,omitempty"`
 	ExtraHeaders       map[string]string `json:"extra_headers,omitempty"`
@@ -49,9 +50,19 @@ func (c *Config) Normalize() {
 	if c.MaxInputChars <= 0 {
 		c.MaxInputChars = 30000
 	}
-	if c.AuthHeader == "" && c.Wire == WireOpenAI {
-		c.AuthHeader = "Authorization"
-		c.AuthPrefix = "Bearer"
+	if c.NoAuth {
+		c.AuthHeader = ""
+		c.AuthPrefix = ""
+		return
+	}
+	if c.AuthHeader == "" {
+		if c.Wire == WireAnthropic {
+			c.AuthHeader = "x-api-key"
+			c.AuthPrefix = ""
+		} else {
+			c.AuthHeader = "Authorization"
+			c.AuthPrefix = "Bearer"
+		}
 	}
 }
 
@@ -64,24 +75,71 @@ type Preset struct {
 	Model      string
 	AuthHeader string
 	AuthPrefix string
+	NoAuth     bool
+	ExtraBody  map[string]any
 }
 
 var presets = map[string]Preset{
-	"sarvam":     {"sarvam", WireOpenAI, "https://api.sarvam.ai/v1", "sarvam-105b", "api-subscription-key", ""},
-	"openai":     {"openai", WireOpenAI, "https://api.openai.com/v1", "gpt-4o-mini", "Authorization", "Bearer"},
-	"groq":       {"groq", WireOpenAI, "https://api.groq.com/openai/v1", "llama-3.3-70b-versatile", "Authorization", "Bearer"},
-	"openrouter": {"openrouter", WireOpenAI, "https://openrouter.ai/api/v1", "", "Authorization", "Bearer"},
-	"together":   {"together", WireOpenAI, "https://api.together.xyz/v1", "", "Authorization", "Bearer"},
-	"deepseek":   {"deepseek", WireOpenAI, "https://api.deepseek.com/v1", "deepseek-chat", "Authorization", "Bearer"},
-	"mistral":    {"mistral", WireOpenAI, "https://api.mistral.ai/v1", "mistral-large-latest", "Authorization", "Bearer"},
-	"xai":        {"xai", WireOpenAI, "https://api.x.ai/v1", "grok-2-latest", "Authorization", "Bearer"},
-	"gemini":     {"gemini", WireOpenAI, "https://generativelanguage.googleapis.com/v1beta/openai", "gemini-2.0-flash", "Authorization", "Bearer"},
-	"ollama":     {"ollama", WireOpenAI, "http://localhost:11434/v1", "qwen2.5-coder:7b", "Authorization", "Bearer"},
-	"lmstudio":   {"lmstudio", WireOpenAI, "http://localhost:1234/v1", "", "Authorization", "Bearer"},
-	"llamacpp":   {"llamacpp", WireOpenAI, "http://localhost:8080/v1", "", "Authorization", "Bearer"},
-	"vllm":       {"vllm", WireOpenAI, "http://localhost:8000/v1", "", "Authorization", "Bearer"},
-	"anthropic":  {"anthropic", WireAnthropic, "https://api.anthropic.com/v1", "claude-3-5-sonnet-20240620", "x-api-key", ""},
-	"custom":     {"custom", WireOpenAI, "", "", "Authorization", "Bearer"},
+	"sarvam": {
+		Name: "sarvam", Wire: WireOpenAI, BaseURL: "https://api.sarvam.ai/v1",
+		Model: "sarvam-105b", AuthHeader: "api-subscription-key",
+		ExtraBody: map[string]any{"reasoning_effort": nil},
+	},
+	"openai": {
+		Name: "openai", Wire: WireOpenAI, BaseURL: "https://api.openai.com/v1",
+		Model: "gpt-4o-mini", AuthHeader: "Authorization", AuthPrefix: "Bearer",
+	},
+	"groq": {
+		Name: "groq", Wire: WireOpenAI, BaseURL: "https://api.groq.com/openai/v1",
+		Model: "llama-3.3-70b-versatile", AuthHeader: "Authorization", AuthPrefix: "Bearer",
+	},
+	"openrouter": {
+		Name: "openrouter", Wire: WireOpenAI, BaseURL: "https://openrouter.ai/api/v1",
+		AuthHeader: "Authorization", AuthPrefix: "Bearer",
+	},
+	"together": {
+		Name: "together", Wire: WireOpenAI, BaseURL: "https://api.together.xyz/v1",
+		AuthHeader: "Authorization", AuthPrefix: "Bearer",
+	},
+	"deepseek": {
+		Name: "deepseek", Wire: WireOpenAI, BaseURL: "https://api.deepseek.com/v1",
+		Model: "deepseek-chat", AuthHeader: "Authorization", AuthPrefix: "Bearer",
+	},
+	"mistral": {
+		Name: "mistral", Wire: WireOpenAI, BaseURL: "https://api.mistral.ai/v1",
+		Model: "mistral-large-latest", AuthHeader: "Authorization", AuthPrefix: "Bearer",
+	},
+	"xai": {
+		Name: "xai", Wire: WireOpenAI, BaseURL: "https://api.x.ai/v1",
+		Model: "grok-4.7", AuthHeader: "Authorization", AuthPrefix: "Bearer",
+	},
+	"gemini": {
+		Name: "gemini", Wire: WireOpenAI, BaseURL: "https://generativelanguage.googleapis.com/v1beta/openai",
+		Model: "gemini-3.8-flash", AuthHeader: "Authorization", AuthPrefix: "Bearer",
+	},
+	"ollama": {
+		Name: "ollama", Wire: WireOpenAI, BaseURL: "http://localhost:11434/v1",
+		Model: "qwen2.5-coder:7b", NoAuth: true,
+	},
+	"lmstudio": {
+		Name: "lmstudio", Wire: WireOpenAI, BaseURL: "http://localhost:1234/v1",
+		NoAuth: true,
+	},
+	"llamacpp": {
+		Name: "llamacpp", Wire: WireOpenAI, BaseURL: "http://localhost:8080/v1",
+		NoAuth: true,
+	},
+	"vllm": {
+		Name: "vllm", Wire: WireOpenAI, BaseURL: "http://localhost:8000/v1",
+		NoAuth: true,
+	},
+	"anthropic": {
+		Name: "anthropic", Wire: WireAnthropic, BaseURL: "https://api.anthropic.com/v1",
+		Model: "claude-sonnet-5-5", AuthHeader: "x-api-key",
+	},
+	"custom": {
+		Name: "custom", Wire: WireOpenAI, AuthHeader: "Authorization", AuthPrefix: "Bearer",
+	},
 }
 
 // PresetNames returns every preset name, sorted.
@@ -107,36 +165,57 @@ func ApplyPreset(name string) (Config, bool) {
 	if !ok {
 		return Config{}, false
 	}
-	cfg := DefaultConfig()
+	cfg := baseConfig()
 	cfg.Preset = p.Name
 	cfg.Wire = p.Wire
 	cfg.AuthHeader = p.AuthHeader
 	cfg.AuthPrefix = p.AuthPrefix
+	cfg.NoAuth = p.NoAuth
+	if p.NoAuth {
+		cfg.AuthHeader = ""
+		cfg.AuthPrefix = ""
+	}
 	if p.BaseURL != "" {
 		cfg.BaseURL = p.BaseURL
 	}
 	if p.Model != "" {
 		cfg.Model = p.Model
 	}
+	cfg.ExtraBody = cloneAnyMap(p.ExtraBody)
 	return cfg, true
 }
 
 // DefaultConfig is the current app's default provider.
 func DefaultConfig() Config {
-	cfg := Config{
-		Preset:             "sarvam",
+	cfg := baseConfig()
+	cfg.Preset = "sarvam"
+	cfg.BaseURL = "https://api.sarvam.ai/v1"
+	cfg.Model = "sarvam-105b"
+	cfg.AuthHeader = "api-subscription-key"
+	cfg.ExtraBody = map[string]any{"reasoning_effort": nil}
+	return cfg
+}
+
+func baseConfig() Config {
+	return Config{
 		Wire:               WireOpenAI,
-		BaseURL:            "https://api.sarvam.ai/v1",
-		Model:              "sarvam-105b",
-		AuthHeader:         "api-subscription-key",
 		Temperature:        0.2,
 		MaxTokens:          4096,
 		TimeoutSeconds:     120,
 		ResponseFormatJSON: "auto",
 		MaxInputChars:      30000,
-		ExtraBody:          map[string]any{"reasoning_effort": nil},
 	}
-	return cfg
+}
+
+func cloneAnyMap(in map[string]any) map[string]any {
+	if in == nil {
+		return nil
+	}
+	out := make(map[string]any, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
 }
 
 // ResolveKey returns the API key using, in order: an explicit override, the

@@ -62,10 +62,10 @@ func (a *App) editCmd() *cobra.Command {
 	fl.StringVar(&f.project, "project", "", "project id, prefix, or title")
 	fl.BoolVar(&f.clearProject, "clear-project", false, "detach from any project")
 	fl.StringVar(&f.status, "status", "", "status: todo|in_progress|blocked|done")
-	fl.StringSliceVar(&f.checkAdd, "check-add", nil, "append checklist item (repeatable)")
-	fl.StringSliceVar(&f.checkRemove, "check-rm", nil, "remove checklist item by text (repeatable)")
-	fl.StringSliceVar(&f.checkDone, "check-done", nil, "mark checklist item done by text (repeatable)")
-	fl.StringSliceVar(&f.checkUndone, "check-undone", nil, "mark checklist item not done by text (repeatable)")
+	fl.StringArrayVar(&f.checkAdd, "check-add", nil, "append checklist item (repeatable; commas are literal)")
+	fl.StringArrayVar(&f.checkRemove, "check-rm", nil, "remove checklist item by text (repeatable; commas are literal)")
+	fl.StringArrayVar(&f.checkDone, "check-done", nil, "mark checklist item done by text (repeatable; commas are literal)")
+	fl.StringArrayVar(&f.checkUndone, "check-undone", nil, "mark checklist item not done by text (repeatable; commas are literal)")
 	return cmd
 }
 
@@ -74,18 +74,69 @@ func (a *App) runEdit(cmd *cobra.Command, ref string, f editFlags) error {
 	if err != nil {
 		return err
 	}
-	before := it.Clone()
 
+	if a.flags.DryRun {
+		draft := it.Clone()
+		if err := a.applyEdit(cmd, &draft, f, a.now()); err != nil {
+			return err
+		}
+		return a.printJSON(draft)
+	}
+
+	var saved model.Item
+	err = a.DB.Mutate(func(tx *store.Tx) error {
+		cur, ok := tx.Item(it.ID)
+		if !ok {
+			return store.ErrNotFound
+		}
+		before := cur.Clone()
+		if err := a.applyEdit(cmd, cur, f, tx.Now()); err != nil {
+			return err
+		}
+		*cur = model.NormalizeItem(*cur)
+		cur.UpdatedAt = model.NowRFC3339(tx.Now())
+		saved = cur.Clone()
+		tx.Journal(store.Entry{
+			TS:     model.NowRFC3339(tx.Now()),
+			Op:     store.OpUpdate,
+			Label:  "Edited \"" + saved.Title + "\"",
+			Before: &before,
+			After:  &saved,
+		})
+		return nil
+	})
+	if err != nil {
+		if errors.Is(err, store.ErrNotFound) {
+			return notFound("item", it.ID, err)
+		}
+		return err
+	}
+
+	if a.flags.JSON {
+		return a.printJSON(saved)
+	}
+	a.printf("updated %s  %s\n", shortID(saved.ID), saved.Title)
+	return nil
+}
+
+func (a *App) applyEdit(cmd *cobra.Command, it *model.Item, f editFlags, now time.Time) error {
 	if cmd.Flags().Changed("title") && strings.TrimSpace(f.title) != "" {
 		it.Title = strings.TrimSpace(f.title)
 	}
 	if cmd.Flags().Changed("type") {
-		it.Type = model.NormalizeType(f.typ)
+		typ, err := model.ParseType(f.typ)
+		if err != nil {
+			return fail(2, err)
+		}
+		it.Type = typ
 	}
 	if f.clearDue {
 		it.Deadline = nil
 	} else if cmd.Flags().Changed("due") {
-		due := strings.TrimSpace(f.due)
+		due, err := model.ParseDeadlineStrict(f.due)
+		if err != nil {
+			return fail(2, err)
+		}
 		if due == "" {
 			it.Deadline = nil
 		} else {
@@ -126,7 +177,11 @@ func (a *App) runEdit(cmd *cobra.Command, ref string, f editFlags) error {
 		it.ProjectID = id
 	}
 	if cmd.Flags().Changed("status") {
-		applyStatus(&it, f.status, "")
+		st, err := model.ParseStatus(f.status)
+		if err != nil {
+			return fail(2, err)
+		}
+		applyStatus(it, st, "", now)
 	}
 
 	if len(f.checkAdd) > 0 {
@@ -141,21 +196,6 @@ func (a *App) runEdit(cmd *cobra.Command, ref string, f editFlags) error {
 	for _, text := range f.checkUndone {
 		setChecklistDone(it.Checklist, text, false)
 	}
-
-	if a.flags.DryRun {
-		return a.printJSON(it)
-	}
-
-	saved, err := a.DB.UpdateItem(it)
-	if err != nil {
-		return err
-	}
-	a.journalItem(store.OpUpdate, "Edited \""+saved.Title+"\"", &before, &saved)
-
-	if a.flags.JSON {
-		return a.printJSON(saved)
-	}
-	a.printf("updated %s  %s\n", shortID(saved.ID), saved.Title)
 	return nil
 }
 
@@ -186,16 +226,37 @@ func (a *App) statusLeaf(use, status string, wantsNote bool) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			before := it.Clone()
-			applyStatus(&it, status, note)
-			if status == model.StatusDone && cmd.Flags().Changed("actual") {
-				it.ActualHours = actual
-			}
-			saved, err := a.DB.UpdateItem(it)
+			changedActual := cmd.Flags().Changed("actual")
+
+			var saved model.Item
+			err = a.DB.Mutate(func(tx *store.Tx) error {
+				cur, ok := tx.Item(it.ID)
+				if !ok {
+					return store.ErrNotFound
+				}
+				before := cur.Clone()
+				applyStatus(cur, status, note, tx.Now())
+				if status == model.StatusDone && changedActual {
+					cur.ActualHours = actual
+				}
+				*cur = model.NormalizeItem(*cur)
+				cur.UpdatedAt = model.NowRFC3339(tx.Now())
+				saved = cur.Clone()
+				tx.Journal(store.Entry{
+					TS:     model.NowRFC3339(tx.Now()),
+					Op:     store.OpUpdate,
+					Label:  "Changed \"" + saved.Title + "\" to " + saved.Status,
+					Before: &before,
+					After:  &saved,
+				})
+				return nil
+			})
 			if err != nil {
+				if errors.Is(err, store.ErrNotFound) {
+					return notFound("item", it.ID, err)
+				}
 				return err
 			}
-			a.journalItem(store.OpUpdate, "Changed \""+saved.Title+"\" to "+saved.Status, &before, &saved)
 			if a.flags.JSON {
 				return a.printJSON(saved)
 			}
@@ -212,8 +273,17 @@ func (a *App) statusLeaf(use, status string, wantsNote bool) *cobra.Command {
 	return cmd
 }
 
-func applyStatus(it *model.Item, status, note string) {
+func applyStatus(it *model.Item, status, note string, now time.Time) {
+	wasDone := it.IsDone()
 	it.Status = model.NormalizeStatus(status)
+	if it.Status == model.StatusDone {
+		if !wasDone || it.CompletedAt == nil {
+			ts := model.NowRFC3339(now)
+			it.CompletedAt = &ts
+		}
+	} else {
+		it.CompletedAt = nil
+	}
 	if it.Status == model.StatusBlocked {
 		if it.BlockerNote == nil || strings.TrimSpace(*it.BlockerNote) == "" {
 			n := strings.TrimSpace(note)
@@ -240,17 +310,44 @@ func (a *App) rmCmd() *cobra.Command {
 			if !a.confirm(fmt.Sprintf("Delete %d item(s)?", len(args))) {
 				return fail(1, errors.New("aborted (pass --yes to skip confirmation)"))
 			}
+
+			ids := make([]string, 0, len(args))
 			for _, ref := range args {
 				it, err := a.requireItem(ref)
 				if err != nil {
 					return err
 				}
-				before := it.Clone()
-				if _, err := a.DB.DeleteItem(it.ID); err != nil {
-					return err
+				ids = append(ids, it.ID)
+			}
+
+			deleted := make([]model.Item, 0, len(ids))
+			err := a.DB.Mutate(func(tx *store.Tx) error {
+				for _, id := range ids {
+					cur, ok := tx.Item(id)
+					if !ok {
+						return store.ErrNotFound
+					}
+					before := cur.Clone()
+					removeItem(tx.Store(), id)
+					deleted = append(deleted, before)
+					tx.Journal(store.Entry{
+						TS:     model.NowRFC3339(tx.Now()),
+						Op:     store.OpDelete,
+						Label:  "Deleted \"" + before.Title + "\"",
+						Before: &before,
+					})
 				}
-				a.journalItem(store.OpDelete, "Deleted \""+before.Title+"\"", &before, nil)
-				a.printf("deleted %s  %s\n", shortID(before.ID), before.Title)
+				return nil
+			})
+			if err != nil {
+				return err
+			}
+
+			if a.flags.JSON {
+				return a.printJSON(map[string]any{"deleted": deleted})
+			}
+			for _, it := range deleted {
+				a.printf("deleted %s  %s\n", shortID(it.ID), it.Title)
 			}
 			return nil
 		},
@@ -293,6 +390,9 @@ func (a *App) runUndo(list bool, n int) error {
 		if n > 0 && len(entries) > n {
 			start = len(entries) - n
 		}
+		if a.flags.JSON {
+			return a.printJSON(entries[start:])
+		}
 		for _, e := range entries[start:] {
 			label := e.Label
 			if label == "" {
@@ -303,78 +403,138 @@ func (a *App) runUndo(list bool, n int) error {
 		return nil
 	}
 
-	entry, err := store.LastUndoable(a.Paths)
+	var undone *store.Entry
+	err = a.DB.Mutate(func(tx *store.Tx) error {
+		entry, err := store.LastUndoable(a.Paths)
+		if err != nil {
+			return err
+		}
+		if entry == nil {
+			return fail(1, errors.New("nothing to undo"))
+		}
+		if err := undoEntry(tx, entry); err != nil {
+			return err
+		}
+		tx.Journal(store.Entry{
+			TS:      model.NowRFC3339(tx.Now()),
+			Op:      store.OpUndo,
+			UndoSeq: entry.Seq,
+			Label:   entry.Label,
+		})
+		undone = entry
+		return nil
+	})
 	if err != nil {
 		return err
 	}
-	if entry == nil {
-		return fail(1, errors.New("nothing to undo"))
-	}
 
-	switch {
-	case entry.ProjectAfter != nil || entry.ProjectBefore != nil:
-		if err := a.undoProject(entry); err != nil {
-			return err
-		}
-	default:
-		if err := a.undoItem(entry); err != nil {
-			return err
-		}
-	}
-
-	_ = store.Append(a.Paths, store.Entry{TS: a.now().Format(time.RFC3339), Op: store.OpUndo, Label: entry.Label})
-	label := entry.Label
+	label := undone.Label
 	if label == "" {
-		label = entry.Op
+		label = undone.Op
+	}
+	if a.flags.JSON {
+		return a.printJSON(map[string]any{
+			"undone": label,
+			"op":     undone.Op,
+			"batch":  len(undone.Batch),
+		})
 	}
 	a.printf("undid: %s\n", label)
 	return nil
 }
 
-func (a *App) undoItem(e *store.Entry) error {
+func undoEntry(tx *store.Tx, e *store.Entry) error {
+	if len(e.Batch) > 0 {
+		for i := len(e.Batch) - 1; i >= 0; i-- {
+			change := e.Batch[i]
+			switch {
+			case change.Before != nil:
+				restoreItem(tx.Store(), *change.Before)
+			case change.After != nil:
+				removeItem(tx.Store(), change.After.ID)
+			}
+		}
+		return nil
+	}
+	if e.ProjectAfter != nil || e.ProjectBefore != nil || len(e.ItemsBefore) > 0 {
+		switch {
+		case e.Op == store.OpCreate:
+			if e.ProjectAfter != nil {
+				removeProject(tx.Store(), e.ProjectAfter.ID)
+			}
+		default:
+			if e.ProjectBefore != nil {
+				restoreProject(tx.Store(), *e.ProjectBefore)
+			}
+		}
+		for _, it := range e.ItemsBefore {
+			restoreItem(tx.Store(), it)
+		}
+		if e.DefaultProjectIDBefore != nil {
+			tx.Store().Profile.DefaultProjectID = e.DefaultProjectIDBefore
+		}
+		return nil
+	}
+
 	switch e.Op {
 	case store.OpCreate:
 		if e.After == nil {
 			return errors.New("journal entry is missing the created item")
 		}
-		_, err := a.DB.DeleteItem(e.After.ID)
-		return err
-	case store.OpDelete:
-		if e.Before == nil {
-			return errors.New("journal entry is missing the deleted item")
-		}
-		return a.DB.RestoreItem(*e.Before)
-	case store.OpUpdate:
+		removeItem(tx.Store(), e.After.ID)
+	case store.OpDelete, store.OpUpdate:
 		if e.Before == nil {
 			return errors.New("journal entry is missing the previous item")
 		}
-		return a.DB.RestoreItem(*e.Before)
+		restoreItem(tx.Store(), *e.Before)
 	default:
 		return fmt.Errorf("cannot undo operation %q", e.Op)
+	}
+	return nil
+}
+
+func removeItem(s *model.Store, id string) {
+	for i := range s.Items {
+		if s.Items[i].ID == id {
+			s.Items = append(s.Items[:i], s.Items[i+1:]...)
+			return
+		}
 	}
 }
 
-func (a *App) undoProject(e *store.Entry) error {
-	switch e.Op {
-	case store.OpCreate:
-		if e.ProjectAfter == nil {
-			return errors.New("journal entry is missing the created project")
+func restoreItem(s *model.Store, it model.Item) {
+	for i := range s.Items {
+		if s.Items[i].ID == it.ID {
+			// Update and rescore journal snapshots omit rawContent to keep the
+			// journal small; none of those operations change it, so preserve
+			// the current value when restoring.
+			if it.RawContent == "" && s.Items[i].RawContent != "" {
+				it.RawContent = s.Items[i].RawContent
+			}
+			s.Items[i] = it
+			return
 		}
-		_, err := a.DB.DeleteProject(e.ProjectAfter.ID)
-		return err
-	case store.OpDelete:
-		if e.ProjectBefore == nil {
-			return errors.New("journal entry is missing the deleted project")
-		}
-		return a.DB.RestoreProject(*e.ProjectBefore)
-	case store.OpUpdate:
-		if e.ProjectBefore == nil {
-			return errors.New("journal entry is missing the previous project")
-		}
-		return a.DB.RestoreProject(*e.ProjectBefore)
-	default:
-		return fmt.Errorf("cannot undo operation %q", e.Op)
 	}
+	s.Items = append(s.Items, it)
+}
+
+func removeProject(s *model.Store, id string) {
+	for i := range s.Projects {
+		if s.Projects[i].ID == id {
+			s.Projects = append(s.Projects[:i], s.Projects[i+1:]...)
+			return
+		}
+	}
+}
+
+func restoreProject(s *model.Store, p model.Project) {
+	for i := range s.Projects {
+		if s.Projects[i].ID == p.ID {
+			s.Projects[i] = p
+			return
+		}
+	}
+	s.Projects = append(s.Projects, p)
 }
 
 // confirm asks for confirmation. Non-interactive callers must pass --yes.
